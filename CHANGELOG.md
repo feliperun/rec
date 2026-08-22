@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.0.1](https://github.com/feliperun/rec/compare/v1.0.0...v1.0.1) (2026-08-22)
+
+
+### Bug Fixes
+
+* ship arm64-only release builds ([75938b5](https://github.com/feliperun/rec/commit/75938b5926f88eea8d71f892b70e38d91736c143))
+
 ## 1.0.0 (2026-08-22)
 
 
