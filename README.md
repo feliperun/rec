@@ -14,8 +14,8 @@ without leaving the terminal.
 curl -fsSL https://raw.githubusercontent.com/feliperun/rec/main/install.sh | sh
 ```
 
-Downloads the latest release for your Mac's architecture and installs the
-`rec` binary to `/usr/local/bin`. No dependencies beyond the OS.
+Downloads the latest release and installs the `rec` binary to
+`/usr/local/bin`. Apple Silicon only; no dependencies beyond the OS.
 
 ## Usage
 
@@ -106,7 +106,8 @@ See [`docs/SPEC.md`](docs/SPEC.md) for the full functional specification.
 
 - `recordings/` is git-ignored, together with build outputs (`.zig-cache/`,
   `zig-out/`).
-- WAV is the only supported format; this project targets macOS only.
+- WAV is the only supported format; this project targets Apple Silicon macOS
+  only.
 
 ## License
 

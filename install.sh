@@ -17,14 +17,11 @@ if [ "$os" != "Darwin" ]; then
 fi
 
 arch="$(uname -m)"
-case "$arch" in
-  arm64) asset="rec-macos-arm64" ;;
-  x86_64) asset="rec-macos-x86_64" ;;
-  *)
-    echo "error: unsupported architecture: $arch" >&2
-    exit 1
-    ;;
-esac
+if [ "$arch" != "arm64" ]; then
+  echo "error: $BIN_NAME only ships Apple Silicon (arm64) builds (detected: $arch)" >&2
+  exit 1
+fi
+asset="rec-macos-arm64"
 
 api_url="https://api.github.com/repos/${REPO}/releases/latest"
 download_url="$(curl -fsSL "$api_url" | grep -o "\"browser_download_url\": *\"[^\"]*${asset}\"" | sed -E 's/.*"(https:[^"]+)"/\1/')"

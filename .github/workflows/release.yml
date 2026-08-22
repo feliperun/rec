@@ -23,14 +23,9 @@ jobs:
   build:
     needs: release-please
     if: ${{ needs.release-please.outputs.release_created == 'true' }}
-    strategy:
-      matrix:
-        include:
-          - runner: macos-14
-            arch: arm64
-          - runner: macos-13
-            arch: x86_64
-    runs-on: ${{ matrix.runner }}
+    # Apple Silicon only: GitHub's Intel macOS runners (macos-13) are being
+    # retired and no longer schedule reliably.
+    runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
         with:
@@ -43,7 +38,7 @@ jobs:
       - run: zig build -Doptimize=ReleaseFast
       - run: |
           mkdir -p dist
-          cp zig-out/bin/rec "dist/rec-macos-${{ matrix.arch }}"
-      - run: gh release upload "${{ needs.release-please.outputs.tag_name }}" "dist/rec-macos-${{ matrix.arch }}" --clobber
+          cp zig-out/bin/rec dist/rec-macos-arm64
+      - run: gh release upload "${{ needs.release-please.outputs.tag_name }}" dist/rec-macos-arm64 --clobber
         env:
           GH_TOKEN: ${{ github.token }}
