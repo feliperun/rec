@@ -1,0 +1,49 @@
+name: release
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    outputs:
+      release_created: ${{ steps.release.outputs.release_created }}
+      tag_name: ${{ steps.release.outputs.tag_name }}
+    steps:
+      - uses: googleapis/release-please-action@v5
+        id: release
+        with:
+          release-type: simple
+
+  build:
+    needs: release-please
+    if: ${{ needs.release-please.outputs.release_created == 'true' }}
+    strategy:
+      matrix:
+        include:
+          - runner: macos-14
+            arch: arm64
+          - runner: macos-13
+            arch: x86_64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.release-please.outputs.tag_name }}
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: "0.16.0"
+      # Releases are always built ReleaseFast: optimized and stripped of
+      # safety checks, so the distributed binary stays small.
+      - run: zig build -Doptimize=ReleaseFast
+      - run: |
+          mkdir -p dist
+          cp zig-out/bin/rec "dist/rec-macos-${{ matrix.arch }}"
+      - run: gh release upload "${{ needs.release-please.outputs.tag_name }}" "dist/rec-macos-${{ matrix.arch }}" --clobber
+        env:
+          GH_TOKEN: ${{ github.token }}

@@ -1,0 +1,4 @@
+.runs/
+.zig-cache/
+zig-out/
+recordings/
