@@ -20,8 +20,8 @@ pub const RenderParams = struct {
     duration_sec: ?f64,
 };
 
-/// Renders the full OKF markdown bundle: YAML frontmatter over an
-/// utterance table and a plain-text join. Caller frees the returned bytes.
+/// Renders the full OKF markdown bundle: YAML frontmatter over plain prose,
+/// one paragraph per speaker turn. Caller frees the returned bytes.
 pub fn render(gpa: std.mem.Allocator, params: RenderParams, utterances: []const transcribe.Utterance) std.mem.Allocator.Error![]u8 {
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(gpa);
@@ -46,82 +46,26 @@ pub fn render(gpa: std.mem.Allocator, params: RenderParams, utterances: []const 
     try appendYamlValue(gpa, &out, params.language);
     if (params.duration_sec) |d| try out.print(gpa, "\nduration_sec: {d}", .{d});
 
-    try out.appendSlice(gpa, "\n---\n# Utterances\n\n| start | end | speaker | text |\n|-------|-----|---------|------|\n");
+    try out.appendSlice(gpa, "\n---\n");
 
-    var time_buf: [16]u8 = undefined;
+    // Diarization survives only as paragraph structure — per-utterance
+    // timestamps and speaker labels stay out of the file on purpose:
+    // consecutive utterances of one speaker join into a single paragraph,
+    // a speaker change starts a new one. Text is verbatim; exactly one
+    // trailing newline keeps diffs stable.
+    var prev_speaker: ?u32 = null;
     for (utterances) |u| {
-        try out.appendSlice(gpa, "| ");
-        try out.appendSlice(gpa, formatTime(&time_buf, u.start_sec));
-        try out.appendSlice(gpa, " | ");
-        try out.appendSlice(gpa, formatTime(&time_buf, u.end_sec));
-        try out.print(gpa, " | S{d} | ", .{u.speaker});
-        for (u.text) |ch| switch (ch) {
-            '|' => try out.appendSlice(gpa, "\\|"),
-            '\n', '\r' => try out.append(gpa, ' '),
-            else => try out.append(gpa, ch),
-        };
-        try out.appendSlice(gpa, " |\n");
-    }
-
-    // The text join keeps raw transcripts (escaping is a table concern) and
-    // ends with exactly one newline so files stay diff-stable.
-    try out.appendSlice(gpa, "\n# Text\n\n");
-    for (utterances, 0..) |u, i| {
-        if (i != 0) try out.append(gpa, ' ');
+        if (prev_speaker) |s| {
+            if (u.speaker == s) try out.append(gpa, ' ') else try out.appendSlice(gpa, "\n\n");
+        } else {
+            try out.append(gpa, '\n');
+        }
         try out.appendSlice(gpa, u.text);
+        prev_speaker = u.speaker;
     }
     try out.append(gpa, '\n');
 
     return out.toOwnedSlice(gpa);
-}
-
-/// MM:SS below one hour and HH:MM:SS from there up; half a second rounds to
-/// the nearest second, matching library's duration display. Clamped so
-/// @intFromFloat cannot trap on absurd values.
-fn formatTime(buf: []u8, sec: f64) []const u8 {
-    const total: u64 = @intFromFloat(@min(@max(sec + 0.5, 0.0), 3.2e9));
-    const ss: u32 = @intCast(total % 60);
-    const mm: u32 = @intCast((total / 60) % 60);
-    const hh: u64 = total / 3600;
-
-    var n: usize = 0;
-    if (hh > 0) {
-        // Two-digit hours per the spec's HH form; wider only past 99 h.
-        if (hh < 100) {
-            put2(buf[n..][0..2], @intCast(hh));
-            n += 2;
-        } else {
-            putUint(buf, &n, hh);
-        }
-        buf[n] = ':';
-        n += 1;
-        put2(buf[n..][0..2], mm);
-        n += 2;
-    } else {
-        put2(buf[n..][0..2], mm);
-        n += 2;
-    }
-    buf[n] = ':';
-    n += 1;
-    put2(buf[n..][0..2], ss);
-    n += 2;
-    return buf[0..n];
-}
-
-fn putUint(buf: []u8, n: *usize, v: u64) void {
-    var tmp: [20]u8 = undefined;
-    var len: usize = 0;
-    var x = v;
-    while (x > 0) {
-        tmp[len] = '0' + @as(u8, @intCast(x % 10));
-        len += 1;
-        x /= 10;
-    }
-    while (len > 0) {
-        len -= 1;
-        buf[n.*] = tmp[len];
-        n.* += 1;
-    }
 }
 
 // libc time functions (libc is already linked for miniaudio): UTC naming
@@ -248,23 +192,37 @@ test "renders the spec's golden document byte-for-byte" {
         \\language: pt-BR
         \\duration_sec: 12.5
         \\---
-        \\# Utterances
         \\
-        \\| start | end | speaker | text |
-        \\|-------|-----|---------|------|
-        \\| 00:00 | 00:02 | S0 | Bom dia. |
-        \\| 00:02 | 00:05 | S1 | Tudo bem? |
+        \\Bom dia.
         \\
-        \\# Text
-        \\
-        \\Bom dia. Tudo bem?
+        \\Tudo bem?
         \\
     , doc);
 }
 
-test "omits null duration, switches to HH:MM:SS past one hour, escapes table cells" {
+test "same-speaker utterances merge into one paragraph; a change starts another" {
     const utterances = [_]transcribe.Utterance{
-        // 3599.7 rounds to exactly one hour — the MM:SS/HH:MM:SS boundary.
+        .{ .start_sec = 0.0, .end_sec = 1.0, .speaker = 0, .text = @constCast("Bom dia.") },
+        .{ .start_sec = 1.2, .end_sec = 2.0, .speaker = 0, .text = @constCast("Como vai?") },
+        .{ .start_sec = 2.1, .end_sec = 3.0, .speaker = 1, .text = @constCast("Tudo bem.") },
+        .{ .start_sec = 3.4, .end_sec = 4.0, .speaker = 1, .text = @constCast("E você?") },
+        .{ .start_sec = 4.2, .end_sec = 5.0, .speaker = 0, .text = @constCast("Ótimo.") },
+    };
+    const doc = try render(std.testing.allocator, .{
+        .title = "t",
+        .resource = "recordings/r.wav",
+        .timestamp = "2026-08-26T12:00:00Z",
+        .model = "nova-3",
+        .language = "pt-BR",
+        .duration_sec = null,
+    }, &utterances);
+    defer std.testing.allocator.free(doc);
+
+    try std.testing.expectEqualStrings("\n---\n\nBom dia. Como vai?\n\nTudo bem. E você?\n\nÓtimo.\n", doc[std.mem.indexOf(u8, doc, "\n---\n").?..]);
+}
+
+test "omits null duration and keeps transcript text verbatim" {
+    const utterances = [_]transcribe.Utterance{
         .{ .start_sec = 3599.7, .end_sec = 3661.4, .speaker = 2, .text = @constCast("Yes | no\nmaybe") },
     };
     const doc = try render(std.testing.allocator, .{
@@ -288,13 +246,6 @@ test "omits null duration, switches to HH:MM:SS past one hour, escapes table cel
         \\model: nova-3
         \\language: en
         \\---
-        \\# Utterances
-        \\
-        \\| start | end | speaker | text |
-        \\|-------|-----|---------|------|
-        \\| 01:00:00 | 01:01:01 | S2 | Yes \| no maybe |
-        \\
-        \\# Text
         \\
         \\Yes | no
         \\maybe

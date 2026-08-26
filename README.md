@@ -63,7 +63,8 @@ The selection resolves exactly like `play`. Requires `DEEPGRAM_API_KEY` in
 the environment. `--language` passes a Deepgram language code (default
 `pt-BR`); `--out` writes to a different path. The document pairs YAML
 frontmatter (type, title, resource, timestamp, model, language, duration)
-with `# Utterances` (timestamped speaker table) and `# Text` sections.
+with the transcript as plain paragraphs — one per speaker turn from
+Deepgram's diarization; no timestamps or speaker labels in the text.
 
 ### Interactive mode
 

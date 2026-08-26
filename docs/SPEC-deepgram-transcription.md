@@ -90,16 +90,10 @@ model: nova-3
 language: pt-BR
 duration_sec: 12.5
 ---
-# Utterances
 
-| start | end | speaker | text |
-|-------|-----|---------|------|
-| 00:00 | 00:02 | S0 | Bom dia. |
-| 00:02 | 00:05 | S1 | Tudo bem? |
+Bom dia.
 
-# Text
-
-Bom dia. Tudo bem?
+Tudo bem?
 ```
 
 Rules:
@@ -108,12 +102,13 @@ Rules:
   `Z`.
 - `duration_sec` comes from the WAV header via `library`'s duration parse;
   omitted when unreadable.
-- Timestamps render as `HH:MM:SS` when ≥ 1 h, else `MM:SS`; speaker indices
-  render as `S<n>` (Deepgram integers).
-- `# Text` joins utterances with spaces (single trailing newline at EOF).
-- Escaping: `|` and newlines inside transcript text are replaced (`\|`, space)
-  so table rows stay well-formed; YAML strings are emitted plain, quoted only
-  if they contain `:` followed by space, leading specials, or non-printables.
+- The body is prose only, no headings, tables, or timestamps: one paragraph
+  per speaker turn from diarization — consecutive utterances of a speaker
+  join with a single space; any speaker change starts a new paragraph.
+- Transcript text is verbatim (no escaping); exactly one trailing newline
+  at EOF.
+- YAML strings are emitted plain, quoted only if they contain `:` followed
+  by space, leading specials, or non-printables.
 
 ## Error handling
 
@@ -136,9 +131,9 @@ All in `zig build test`, no network:
 2. **Response parsing** — fixture JSON (captured Deepgram shape) yields
    ordered utterance list (start, text, speaker); missing/malformed fields
    produce the specified errors.
-3. **OKF rendering** — full document golden test (frontmatter order, table
-   rows, `# Text` join); timestamp/duration formatting edges (`MM:SS` vs
-   `HH:MM:SS`); pipe/newline escaping; duration omitted when null.
+3. **OKF rendering** — full document golden test (frontmatter order, one
+   paragraph per speaker turn, same-speaker merge); duration omitted when
+   null; transcript text kept verbatim.
 4. **Arg parsing** — `--language`/`--out` combinations, unknown flag rejection
    (usage + exit 1).
 5. **Regression** — existing suites stay green; `play` selection behavior
