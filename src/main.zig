@@ -258,7 +258,7 @@ pub fn transcribeSelection(
     defer transcribe.freeUtterances(gpa, utterances);
 
     // The duration shown by `list` is already parsed from the header; reuse
-    // it so frontmatter and table agree.
+    // it for the transcript's duration_sec frontmatter field.
     var duration_sec: ?f64 = null;
     for (entries.items) |e| {
         if (std.mem.eql(u8, e.name, name)) duration_sec = e.duration_sec;
