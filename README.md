@@ -2,6 +2,7 @@
 
 [![CI](https://github.com/feliperun/rec/actions/workflows/ci.yml/badge.svg)](https://github.com/feliperun/rec/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/feliperun/rec)](https://github.com/feliperun/rec/releases/latest)
+[![Made with Zig](https://img.shields.io/badge/Zig-0.16-f7a41d?logo=zig&logoColor=white)](https://ziglang.org)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 **Record. Transcribe. Understand.** A meeting recorder for macOS that lives
