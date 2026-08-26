@@ -220,6 +220,10 @@ pub fn transcribeSelection(
         return 1;
     }
 
+    // Numeric selections index the newest-first order `list` shows; scan
+    // returns directory order, so normalize before resolving.
+    library.sortNewestFirst(entries.items);
+
     const name = library.resolveName(ta.selection, entries.items) orelse {
         printStderr(io, "transcribe: no recording matches '");
         printStderr(io, ta.selection);
