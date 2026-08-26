@@ -1,8 +1,12 @@
 const std = @import("std");
+const formatcmd = @import("formatcmd.zig");
 const library = @import("library.zig");
+const llm = @import("llm.zig");
 const okf = @import("okf.zig");
 const playback = @import("playback.zig");
 const record = @import("record.zig");
+const prompts = @import("prompts.zig");
+const setupcmd = @import("setupcmd.zig");
 const transcribe = @import("transcribe.zig");
 const tui = @import("tui.zig");
 
@@ -13,7 +17,13 @@ const usage =
     \\  record [--duration <sec>]  Record audio to ~/recordings/
     \\  list                       List recordings in ~/recordings/
     \\  play <index|filename>      Play a recording
-    \\  transcribe <index|filename>  Transcribe a recording to OKF markdown via Deepgram
+    \\  transcribe <index|filename> [--language lg] [--out path]
+    \\                             [--no-refine] [--context text]
+    \\                             Transcribe via Deepgram and refine with the configured LLM
+    \\  format <index|path> [--template name] [--out path] [--context text]
+    \\                             Restructure a transcript with a prompt template (default: meeting)
+    \\  setup                      Choose which coding-agent LLM processes transcripts
+    \\                             (alias: configure-llm)
     \\
     \\With no command, enters interactive mode.
     \\
@@ -33,11 +43,10 @@ pub fn main(init: std.process.Init) u8 {
         };
     }
 
+    const home_dir: []const u8 = init.minimal.environ.getPosix("HOME") orelse "";
+
     var recordings_path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const recordings_path = library.homeRecordingsPath(
-        init.minimal.environ.getPosix("HOME") orelse "",
-        &recordings_path_buf,
-    ) orelse {
+    const recordings_path = library.homeRecordingsPath(home_dir, &recordings_path_buf) orelse {
         printStderr(io, "rec: cannot determine HOME/recordings directory\n");
         return 1;
     };
@@ -81,7 +90,24 @@ pub fn main(init: std.process.Init) u8 {
         // One environment lookup here (the only place the raw environ is in
         // scope); transcribeSelection still orders its errors so a bad
         // selection is reported before a missing key.
-        return transcribeSelection(io, init.gpa, rest, init.minimal.environ.getPosix("DEEPGRAM_API_KEY"), recordings_path);
+        return transcribeSelection(
+            io,
+            init.gpa,
+            rest,
+            init.minimal.environ.getPosix("DEEPGRAM_API_KEY"),
+            home_dir,
+            recordings_path,
+        );
+    }
+
+    if (std.mem.eql(u8, cmd, "format")) {
+        return formatcmd.run(io, init.gpa, rest, home_dir, recordings_path);
+    }
+
+    // The LLM choice lives behind two names: `setup` for first-run configure,
+    // `configure-llm` for when the word is about changing it later.
+    if (std.mem.eql(u8, cmd, "setup") or std.mem.eql(u8, cmd, "configure-llm")) {
+        return setupcmd.run(io, init.gpa, home_dir);
     }
 
     printStderr(io, usage);
@@ -114,7 +140,11 @@ const default_language = "pt-BR";
 const TranscribeSelection = struct {
     selection: []const u8,
     language: []const u8,
-    out: ?[]const u8,
+    out: ?[]const u8 = null,
+    /// Skip the built-in LLM refinement pass.
+    no_refine: bool = false,
+    /// Domain context forwarded to the refine prompt.
+    context: ?[]const u8 = null,
 };
 
 const TranscribeArgs = union(enum) {
@@ -123,31 +153,38 @@ const TranscribeArgs = union(enum) {
 };
 
 /// Pure argument parsing for `transcribe` (kept free of I/O so tests stay
-/// offline): the first non-flag token is the selection, --language/--out
-/// consume the following token and keep their last occurrence, and anything
-/// else — unknown flags, missing values, extra positionals — is invalid.
+/// offline): the first non-flag token is the selection, flags consume the
+/// following token (--no-refine takes none) and keep their last occurrence,
+/// and anything else — unknown flags, missing values, extra positionals — is
+/// invalid.
 fn parseTranscribeArgs(args: []const [:0]const u8) TranscribeArgs {
-    var selection: ?[]const u8 = null;
-    var language: []const u8 = default_language;
-    var out: ?[]const u8 = null;
+    var parsed = TranscribeSelection{ .selection = "", .language = default_language };
+    var seen_selection = false;
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
         if (std.mem.eql(u8, args[i], "--language")) {
             i += 1;
             if (i >= args.len) return .invalid;
-            language = args[i];
+            parsed.language = args[i];
         } else if (std.mem.eql(u8, args[i], "--out")) {
             i += 1;
             if (i >= args.len) return .invalid;
-            out = args[i];
-        } else if (selection == null and !std.mem.startsWith(u8, args[i], "-")) {
-            selection = args[i];
+            parsed.out = args[i];
+        } else if (std.mem.eql(u8, args[i], "--context")) {
+            i += 1;
+            if (i >= args.len) return .invalid;
+            parsed.context = args[i];
+        } else if (std.mem.eql(u8, args[i], "--no-refine")) {
+            parsed.no_refine = true;
+        } else if (!seen_selection and !std.mem.startsWith(u8, args[i], "-")) {
+            parsed.selection = args[i];
+            seen_selection = true;
         } else {
             return .invalid;
         }
     }
-    const sel = selection orelse return .invalid;
-    return .{ .ok = .{ .selection = sel, .language = language, .out = out } };
+    if (!seen_selection) return .invalid;
+    return .{ .ok = parsed };
 }
 
 /// The transcribe command body, shaped like playSelection: resolve the
@@ -160,6 +197,7 @@ pub fn transcribeSelection(
     gpa: std.mem.Allocator,
     args: []const [:0]const u8,
     api_key: ?[]const u8,
+    home_dir: []const u8,
     recordings_path: []const u8,
 ) u8 {
     const ta = switch (parseTranscribeArgs(args)) {
@@ -299,7 +337,117 @@ pub fn transcribeSelection(
     printStderr(io, "Transcript saved to ");
     printStderr(io, out_path);
     printStderr(io, "\n");
+
+    // Refinement never trades away the artifact: on any failure the raw
+    // transcript stays exactly as saved and the command still exits 0.
+    if (ta.no_refine) return 0;
+    refineTranscript(io, gpa, home_dir, doc, ta.context, out_path);
     return 0;
+}
+
+/// The built-in second pass over a fresh transcript: the bundled `refine`
+/// prompt (user-customizable in ~/.config/rec/templates/) runs through the
+/// harness chosen by `rec setup`, and the file is rewritten with its
+/// frontmatter kept and the prose replaced by the model's corrected version.
+/// Every failure path prints a warning and leaves the original untouched.
+fn refineTranscript(
+    io: std.Io,
+    gpa: std.mem.Allocator,
+    home_dir: []const u8,
+    doc: []const u8,
+    context: ?[]const u8,
+    out_path: []const u8,
+) void {
+    var cfg_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const config_dir = llm.configDirPath(home_dir, llm.envValue("XDG_CONFIG_HOME"), &cfg_buf) orelse {
+        printStderr(io, "refine: ignorado (sem diretório de configuração)\n");
+        return;
+    };
+
+    const runner = switch (llm.resolveRunner(io, gpa, config_dir)) {
+        .ok => |r| r,
+        .none => |reason| {
+            printStderr(io, "refine: ignorado (");
+            printStderr(io, reason);
+            printStderr(io, ")\n");
+            return;
+        },
+    };
+    defer gpa.free(runner.bin_path);
+
+    var tpl_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const templates_dir = llm.templatesDirPath(config_dir, &tpl_buf).?;
+    llm.materializeTemplates(io, templates_dir);
+
+    // Customized template wins; the embedded copy covers missing/read-only.
+    const template: []u8 = tpl: {
+        if (llm.loadTemplate(io, gpa, templates_dir, "refine")) |t| break :tpl t else |_| {}
+        break :tpl gpa.dupe(u8, prompts.refine_md) catch {
+            printStderr(io, "refine: ignorado (sem memória)\n");
+            return;
+        };
+    };
+    defer gpa.free(template);
+
+    const split = prompts.splitFrontmatter(doc);
+    const prompt_doc = prompts.compose(gpa, template, context, split.body) catch {
+        printStderr(io, "refine: ignorado (sem memória)\n");
+        return;
+    };
+    defer gpa.free(prompt_doc);
+
+    var describe_buf: [128]u8 = undefined;
+    printStderr(io, "Refinando com ");
+    printStderr(io, runner.describe(&describe_buf));
+    printStderr(io, "...\n");
+
+    var note: [llm.max_note_bytes]u8 = undefined;
+    var note_len: usize = 0;
+    var invocation = llm.run(
+        io,
+        gpa,
+        runner.kind,
+        runner.bin_path,
+        runner.model,
+        prompt_doc,
+        llm.job_timeout_ns,
+        &note,
+        &note_len,
+    ) catch |err| {
+        printStderr(io, "refine: falhou (");
+        printStderr(io, llm.failurePhrase(err));
+        if (note_len > 0) {
+            printStderr(io, ": ");
+            printStderr(io, note[0..note_len]);
+        }
+        printStderr(io, "); transcrição original mantida\n");
+        return;
+    };
+    defer invocation.deinit();
+
+    var refined: std.ArrayList(u8) = .empty;
+    defer refined.deinit(gpa);
+    refined.appendSlice(gpa, split.head) catch return;
+    refined.appendSlice(gpa, invocation.text()) catch return;
+    refined.append(gpa, '\n') catch return;
+
+    const file = std.Io.Dir.cwd().createFile(io, out_path, .{}) catch {
+        printStderr(io, "refine: não consegui regravar ");
+        printStderr(io, out_path);
+        printStderr(io, "\n");
+        return;
+    };
+    defer file.close(io);
+    file.writeStreamingAll(io, refined.items) catch {
+        printStderr(io, "refine: não consegui regravar ");
+        printStderr(io, out_path);
+        printStderr(io, "\n");
+        return;
+    };
+
+    printStderr(io, "Transcrição refinada: ");
+    printStderr(io, out_path);
+    printStderr(io, "\n");
 }
 
 /// curl's stderr tail flattened to a single line — newlines become one
@@ -335,8 +483,12 @@ test {
     _ = @import("m4a.zig");
     _ = @import("capture.zig");
     _ = @import("record.zig");
+    _ = @import("formatcmd.zig");
     _ = @import("library.zig");
+    _ = @import("llm.zig");
     _ = @import("playback.zig");
+    _ = @import("prompts.zig");
+    _ = @import("setupcmd.zig");
     _ = @import("tui.zig");
     _ = @import("transcribe.zig");
     _ = @import("okf.zig");
@@ -411,7 +563,22 @@ test "transcribe args: rejects unknown flags, missing values, and extra tokens" 
     try transcribeArgsInvalid(&.{ "1", "-x" });
     try transcribeArgsInvalid(&.{ "1", "--language" }); // missing flag value
     try transcribeArgsInvalid(&.{ "1", "--out" }); // missing flag value
+    try transcribeArgsInvalid(&.{ "1", "--context" }); // missing flag value
     try transcribeArgsInvalid(&.{ "1", "2" }); // extra positional
+}
+
+test "transcribe args: refinement defaults off and flags parse together" {
+    const plain = try transcribeArgsOk(&.{"2"});
+    try std.testing.expect(!plain.no_refine);
+    try std.testing.expect(plain.context == null);
+
+    const refined = try transcribeArgsOk(&.{ "1", "--no-refine", "--context", "consulta cardiológica" });
+    try std.testing.expect(refined.no_refine);
+    try std.testing.expectEqualStrings("consulta cardiológica", refined.context.?);
+
+    // Repeated --context keeps the last occurrence, like every other flag.
+    const repeated = try transcribeArgsOk(&.{ "1", "--context", "a", "--context", "b" });
+    try std.testing.expectEqualStrings("b", repeated.context.?);
 }
 
 test "transcribe args: rejects a missing selection" {

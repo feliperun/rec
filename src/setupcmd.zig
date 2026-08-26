@@ -1,0 +1,279 @@
+const std = @import("std");
+const llm = @import("llm.zig");
+
+const probe_prompt = "Responda exatamente: OK";
+
+/// `rec setup` — detects which coding-agent harnesses are installed AND
+/// authenticated by running a real one-token probe through them, asks the
+/// user to pick a harness and a model, validates that exact combination, and
+/// persists it as rec's processing backend (`config.json`). Re-running the
+/// command later is how the choice gets changed.
+///
+/// The probe-first design is deliberate: credential files and version strings
+/// lie about usable sessions (quota exhausted, expired tokens, plan-gated
+/// providers), so only an actual round-trip counts as "available".
+pub fn run(io: std.Io, gpa: std.mem.Allocator, home_dir: []const u8) u8 {
+    var cfg_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const config_dir = llm.configDirPath(
+        home_dir,
+        llm.envValue("XDG_CONFIG_HOME"),
+        &cfg_buf,
+    ) orelse {
+        printOut(io, "setup: não consegui determinar o diretório de configuração\n");
+        return 1;
+    };
+
+    printOut(io, "rec setup — processamento de transcrições por LLM\n\n");
+    printOut(io, "Procurando harnesses de agentes de código instalados e autenticados.\n");
+    printOut(io, "Cada um recebe uma chamada real de teste; pode levar alguns segundos.\n");
+
+    const Probe = struct { idx: usize, bin_path: []u8 };
+    var candidates: std.ArrayList(Probe) = .empty;
+    defer {
+        for (candidates.items) |c| gpa.free(c.bin_path);
+        candidates.deinit(gpa);
+    }
+
+    printOut(io, "\n");
+    for (llm.registry, 0..) |h, i| {
+        printOut(io, "  · ");
+        printOut(io, h.label());
+
+        const bin = llm.findBinary(io, gpa, h.binary) orelse {
+            printOut(io, ": não está no PATH\n");
+            continue;
+        };
+        printOut(io, ": testando chamada real...\n");
+
+        if (ping(io, gpa, h.kind, bin, "")) {
+            printOut(io, "     ✓ pronto\n");
+            candidates.append(gpa, .{ .idx = i, .bin_path = bin }) catch {
+                gpa.free(bin);
+                printOut(io, "setup: sem memória\n");
+                return 1;
+            };
+        } else {
+            gpa.free(bin);
+        }
+    }
+
+    if (candidates.items.len == 0) {
+        printOut(io, "\nNenhum harness utilizável encontrado.\n");
+        printOut(io, "Instale e autentique pelo menos um e rode `rec setup` novamente:\n");
+        for (llm.registry) |h| {
+            printOut(io, "  • ");
+            printOut(io, h.label());
+            printOut(io, " (`");
+            printOut(io, h.binary);
+            printOut(io, "`)\n");
+        }
+        return 1;
+    }
+
+    // Pick a harness; then a model inside a validating loop.
+    while (true) {
+        printOut(io, "\nQual harness deve processar as transcrições?\n");
+        for (candidates.items, 1..) |c, n| {
+            var row: [96]u8 = undefined;
+            const row_s = std.fmt.bufPrint(&row, "  {d}. {s}\n", .{ n, llm.registry[c.idx].label() }) catch continue;
+            printOut(io, row_s);
+        }
+        printOut(io, "  q. sair sem configurar\n");
+
+        var line_buf: [64]u8 = undefined;
+        const line = readLine(&line_buf) orelse return 130;
+        if (isQuit(line)) return 130;
+
+        const pick = parseChoice(line, candidates.items.len) orelse {
+            printOut(io, "Opção inválida.\n");
+            continue;
+        };
+        const chosen = candidates.items[pick - 1];
+        if (!chooseModelAndSave(io, gpa, config_dir, llm.registry[chosen.idx], chosen.bin_path)) {
+            return 130;
+        }
+        return 0;
+    }
+}
+
+/// Model selection UI + live validation + persistence. Returns false when the
+/// user cancelled; failed validations loop back into the menu.
+fn chooseModelAndSave(
+    io: std.Io,
+    gpa: std.mem.Allocator,
+    config_dir: []const u8,
+    harness: llm.Harness,
+    bin_path: []const u8,
+) bool {
+    var listed = llm.listModels(io, gpa, bin_path, harness.kind) catch std.ArrayList([]u8).empty;
+    defer llm.freeTemplateNames(gpa, &listed);
+
+    while (true) {
+        printOut(io, "\nModelos em ");
+        printOut(io, harness.label());
+        printOut(io, ":\n");
+        printOut(io, "  d. padrão da conta do harness\n");
+        for (listed.items, 1..) |m, n| {
+            var row: [192]u8 = undefined;
+            const row_s = std.fmt.bufPrint(&row, "  {d}. {s}\n", .{ n, m }) catch continue;
+            printOut(io, row_s);
+        }
+        if (listed.items.len == 0) {
+            const offset = listed.items.len + 1;
+            for (llm.curatedModels(harness.kind), 0..) |m, i| {
+                var row: [192]u8 = undefined;
+                const n = offset + i;
+                const row_s = std.fmt.bufPrint(&row, "  {d}. {s}  (sugestão)\n", .{ n, m }) catch continue;
+                printOut(io, row_s);
+            }
+        }
+        printOut(io, "  o. outro id de modelo (digitado)\n");
+        printOut(io, "  q. voltar\n");
+
+        var line_buf: [128]u8 = undefined;
+        const line = readLine(&line_buf) orelse return false;
+
+        var chosen_model_buf: [200]u8 = undefined;
+        var chosen_model: ?[]const u8 = null;
+        if (isQuit(line)) return false;
+
+        if (eql(line, "d")) {
+            chosen_model = "";
+        } else if (eql(line, "o")) {
+            printOut(io, "Id do modelo (ex.: ");
+            printOut(io, hintExample(harness.kind));
+            printOut(io, "): ");
+            var typed = readLine(&chosen_model_buf) orelse return false;
+            typed = std.mem.trim(u8, typed, " \t");
+            if (typed.len == 0) {
+                printOut(io, "Id vazio.\n");
+                continue;
+            }
+            chosen_model = typed;
+        } else {
+            const max_choice = listed.items.len + llm.curatedModels(harness.kind).len;
+            const pick = parseChoice(line, max_choice) orelse {
+                printOut(io, "Opção inválida.\n");
+                continue;
+            };
+            if (pick <= listed.items.len) {
+                chosen_model = listed.items[pick - 1];
+            } else {
+                chosen_model = llm.curatedModels(harness.kind)[pick - listed.items.len - 1];
+            }
+        }
+
+        const model_ref = chosen_model.?;
+        if (ping(io, gpa, harness.kind, bin_path, model_ref)) {
+            persist(io, gpa, config_dir, harness.kind, model_ref);
+            return true;
+        }
+        printOut(io, "Escolha outro modelo ou digite um id diferente.\n");
+    }
+}
+
+/// One real round-trip with exactly this harness+model pair; prints nothing.
+fn ping(
+    io: std.Io,
+    gpa: std.mem.Allocator,
+    kind: llm.Kind,
+    bin_path: []const u8,
+    model: []const u8,
+) bool {
+    var note: [llm.max_note_bytes]u8 = undefined;
+    var note_len: usize = 0;
+    const outcome = llm.run(
+        io,
+        gpa,
+        kind,
+        bin_path,
+        model,
+        probe_prompt,
+        llm.probe_timeout_ns,
+        &note,
+        &note_len,
+    );
+    if (outcome) |inv_var| {
+        var inv = inv_var;
+        inv.deinit();
+        return true;
+    } else |err| {
+        // Surface through stdout (setup has no stderr-only contract).
+        printOut(io, "     ✗ indisponível (");
+        printOut(io, llm.failurePhrase(err));
+        if (note_len > 0) {
+            printOut(io, ": ");
+            printOut(io, note[0..note_len]);
+        }
+        printOut(io, ")\n");
+        return false;
+    }
+}
+
+fn persist(io: std.Io, gpa: std.mem.Allocator, config_dir: []const u8, kind: llm.Kind, model: []const u8) void {
+    llm.saveConfig(io, gpa, config_dir, .{ .harness = kind, .model = model }) catch {
+        printOut(io, "\nNão consegui gravar ");
+        printOut(io, config_dir);
+        printOut(io, "/config.json\n");
+        return;
+    };
+    printOut(io, "\nConfiguração salva em ");
+    printOut(io, config_dir);
+    printOut(io, "/config.json\n");
+    printOut(io, "A partir de agora `rec transcribe` refina automaticamente e `rec format`\n");
+    printOut(io, "estrutura transcrições usando este modelo.\n");
+}
+
+fn hintExample(kind: llm.Kind) []const u8 {
+    return switch (kind) {
+        .claude => "sonnet",
+        .codex => "gpt-5-codex",
+        .opencode => "anthropic/claude-sonnet-4-5",
+        .pi => "anthropic/claude-opus-4-6",
+        .gemini => "gemini-2.5-pro",
+    };
+}
+
+// --- output helpers ---------------------------------------------------------
+
+fn printOut(io: std.Io, msg: []const u8) void {
+    std.Io.File.writeStreamingAll(.stdout(), io, msg) catch {};
+}
+
+// --- stdin helpers ----------------------------------------------------------
+
+/// One cooked-mode line from stdin (the kernel handles echo/editing); null at
+/// EOF. Bytes land in `buf`; the caller must keep it alive while using the
+/// returned slice.
+pub fn readLine(buf: []u8) ?[]const u8 {
+    var n: usize = 0;
+    while (n < buf.len) {
+        var byte: [1]u8 = undefined;
+        const got = std.posix.read(0, &byte) catch return null;
+        if (got == 0) {
+            if (n == 0) return null;
+            break;
+        }
+        if (byte[0] == '\n') break;
+        if (byte[0] != '\r') {
+            buf[n] = byte[0];
+            n += 1;
+        }
+    }
+    return buf[0..n];
+}
+
+fn isQuit(line: []const u8) bool {
+    return eql(line, "q") or eql(line, "Q") or eql(line, "sair");
+}
+
+fn parseChoice(line: []const u8, max: usize) ?usize {
+    if (line.len == 0) return null;
+    const v = std.fmt.parseInt(usize, line, 10) catch return null;
+    if (v < 1 or v > max) return null;
+    return v;
+}
+
+fn eql(a: []const u8, b: []const u8) bool {
+    return std.mem.eql(u8, a, b);
+}
