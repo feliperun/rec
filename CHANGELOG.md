@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.2.0](https://github.com/feliperun/rec/compare/v1.1.3...v1.2.0) (2026-08-26)
+
+
+### Features
+
+* record natively in M4A/AAC instead of WAV ([017b5ef](https://github.com/feliperun/rec/commit/017b5ef73a3e9ef06ee3cd3ca8f1829e60e788de))
+* record natively in M4A/AAC instead of WAV ([0611ebd](https://github.com/feliperun/rec/commit/0611ebde1c5d19a1ffac62e03aa22ad0e74c97d7))
+
 ## [1.1.3](https://github.com/feliperun/rec/compare/v1.1.2...v1.1.3) (2026-08-26)
 
 
