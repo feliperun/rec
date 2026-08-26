@@ -1,4 +1,5 @@
 const std = @import("std");
+const m4a = @import("m4a.zig");
 
 pub const recordings_dir = "recordings";
 
@@ -26,8 +27,9 @@ pub fn recordingPath(dir_path: []const u8, name: []const u8, buf: []u8) ?[]const
     return buf[0 .. len + name.len];
 }
 
-/// One row of the library: a WAV under $HOME/recordings/ with its stats and the
-/// duration parsed from its header (null when the header is unreadable).
+/// One row of the library: a recording (.m4a, or a legacy .wav) under
+/// $HOME/recordings/ with its stats and the duration parsed from its
+/// container (null when the container is unreadable).
 pub const Entry = struct {
     name: []u8,
     mtime: std.Io.Timestamp,
@@ -40,8 +42,10 @@ pub fn freeEntries(gpa: std.mem.Allocator, entries: *std.ArrayList(Entry)) void 
     entries.deinit(gpa);
 }
 
-/// Appends every WAV under recordings_path to entries (names owned by gpa).
-/// A missing directory is the empty library, not an error.
+/// Appends every recording under recordings_path to entries (names owned by
+/// gpa): `.m4a` (what record writes now) and `.wav` (files already on disk
+/// from before the format switch — still playable and transcribable). A
+/// missing directory is the empty library, not an error.
 pub fn scan(io: std.Io, gpa: std.mem.Allocator, entries: *std.ArrayList(Entry), recordings_path: []const u8) !void {
     var dir = std.Io.Dir.cwd().openDir(io, recordings_path, .{ .iterate = true }) catch return;
     defer dir.close(io);
@@ -49,14 +53,27 @@ pub fn scan(io: std.Io, gpa: std.mem.Allocator, entries: *std.ArrayList(Entry), 
     var it = dir.iterate();
     while (it.next(io) catch null) |entry| {
         if (entry.kind != .file) continue;
-        if (!std.mem.endsWith(u8, entry.name, ".wav")) continue;
+        const is_m4a = std.mem.endsWith(u8, entry.name, ".m4a");
+        const is_wav = std.mem.endsWith(u8, entry.name, ".wav");
+        if (!is_m4a and !is_wav) continue;
 
         const stat = dir.statFile(io, entry.name, .{}) catch continue;
 
-        // Header prefix only: durations come from the chunk headers, so a few
-        // KiB is plenty and meeting-sized files are never read whole.
-        var prefix: [4096]u8 = undefined;
-        const data: []u8 = dir.readFile(io, entry.name, &prefix) catch prefix[0..0];
+        var duration_sec: ?f64 = null;
+        if (is_m4a) {
+            // Duration comes from the system's MP4 parser.
+            var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+            if (recordingPath(recordings_path, entry.name, &path_buf)) |path| {
+                duration_sec = m4a.durationSec(path);
+            }
+        } else {
+            // Header prefix only: durations come from the chunk headers, so
+            // a few KiB is plenty and meeting-sized files are never read
+            // whole.
+            var prefix: [4096]u8 = undefined;
+            const data: []u8 = dir.readFile(io, entry.name, &prefix) catch prefix[0..0];
+            duration_sec = parseDurationPrefix(data, stat.size);
+        }
 
         const name = try gpa.dupe(u8, entry.name);
         errdefer gpa.free(name);
@@ -64,7 +81,7 @@ pub fn scan(io: std.Io, gpa: std.mem.Allocator, entries: *std.ArrayList(Entry), 
             .name = name,
             .mtime = stat.mtime,
             .size = stat.size,
-            .duration_sec = parseDurationPrefix(data, stat.size),
+            .duration_sec = duration_sec,
         });
     }
 }

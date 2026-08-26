@@ -1,5 +1,4 @@
 const std = @import("std");
-const wav = @import("wav.zig");
 
 pub const ma = @cImport({
     @cInclude("miniaudio.h");
@@ -79,14 +78,6 @@ pub const Recorder = struct {
         if (self.started) {
             _ = ma.ma_device_stop(&self.device);
         }
-    }
-
-    /// Streams the captured PCM into `file` (freshly created, position 0)
-    /// as a finalized WAV: header first, then data, then patched sizes.
-    pub fn writeWav(self: *Recorder, io: std.Io, file: std.Io.File) !u64 {
-        var w = try wav.WavWriter.init(.{ .file = .{ .io = io, .file = file } }, self.sample_rate, self.channels);
-        try w.writeFrames(self.pcm.items);
-        return w.finalize();
     }
 
     pub fn capturedBytes(self: *Recorder) usize {

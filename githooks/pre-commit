@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+# rec pre-commit hook (installed via core.hooksPath).
+# Never bypass with --no-verify; fix the underlying issue instead.
+set -euo pipefail
+
+# Skip if nothing staged.
+git diff --cached --quiet && exit 0
+
+# --- secrets scan over the staged diff ---------------------------------------
+echo "▸ secrets scan"
+# exclude the hooks themselves (they contain the patterns as literals)
+DIFF="$(git diff --cached -U0 -- . ':(exclude)githooks/**')"
+PATTERNS='(AKIA[0-9A-Z]{16}|xox[baprs]-[0-9A-Za-z-]{10,}|gh[pousr]_[0-9A-Za-z]{20,}|-----BEGIN[ A-Z]*PRIVATE KEY-----|AIza[0-9A-Za-z_-]{30,}|"private_key":)'
+if printf '%s' "$DIFF" | grep -nEi "$PATTERNS" | grep -viE '(example|placeholder|dummy|fake|PATTERNS=)' | head -5 | grep -q .; then
+  echo "✗ possible secret in the staged diff — remove it before committing (use a gitignored .env)"; exit 1
+fi
+if git diff --cached --name-only | grep -E '(^|/)\.env($|\.)' | grep -vqE '\.env\.example'; then
+  echo "✗ .env file staged — do not commit secrets"; exit 1
+fi
+
+if [ -f .sentrux/rules.toml ] && command -v sentrux >/dev/null 2>&1; then
+  echo "▸ sentrux check"
+  sentrux check . || { echo "✗ sentrux check failed — fix structure before committing"; exit 1; }
+  if [ -f .sentrux/baseline.json ] && ! grep -q 'placeholder' .sentrux/baseline.json 2>/dev/null; then
+    echo "▸ sentrux gate"
+    sentrux gate . || { echo "✗ sentrux gate: structural regression on touched files"; exit 1; }
+  fi
+elif [ -f .sentrux/rules.toml ]; then
+  echo "⚠ sentrux not installed — skipping structural gate (see docs/sentrux.md)"
+fi
+
+exit 0

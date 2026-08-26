@@ -5,8 +5,8 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 A terminal audio recorder for macOS, written in Zig. Capture microphone
-audio, keep recordings as WAV files on disk, list them, and play them back —
-without leaving the terminal.
+audio, keep recordings as M4A (AAC) files on disk, list them, play them back,
+and transcribe them — without leaving the terminal.
 
 ## Install
 
@@ -25,11 +25,12 @@ Downloads the latest release and installs the `rec` binary to
 rec record [--duration <sec>]
 ```
 
-Records from the default microphone to `~/recordings/YYYYMMDD-HHMMSS.wav`
-(PCM 16-bit, 48 kHz, stereo); `~/recordings/` is created on demand. Without
-`--duration`, recording stops on Ctrl-C; with `--duration <sec>` it stops
-automatically. The file is always finalized with a correct RIFF header, even
-on interrupt.
+Records from the default microphone to `~/recordings/YYYYMMDD-HHMMSS.m4a`
+(AAC, 48 kHz, stereo, encoded by the system's AudioToolbox codec);
+`~/recordings/` is created on demand. Without `--duration`, recording stops on
+Ctrl-C; with `--duration <sec>` it stops automatically. The file is always a
+complete, finalized container — a failed encode leaves no partial file
+behind.
 
 ### list
 
@@ -38,7 +39,8 @@ rec list
 ```
 
 Prints the recordings in `~/recordings/` (newest first) with index,
-filename, duration parsed from the WAV header, and file size.
+filename, duration parsed from the recording's container, and file size.
+Both `.m4a` and pre-existing `.wav` files are listed.
 
 ### play
 
@@ -58,12 +60,13 @@ rec transcribe <index|filename> [--language <code>] [--out <path>]
 
 Transcribes a recording through Deepgram's pre-recorded API and saves an
 [Open Knowledge Format](https://cloud.google.com/blog/products/data-analytics/how-the-open-knowledge-format-can-improve-data-sharing)
-markdown file next to the WAV (`~/recordings/NAME.wav` → `~/recordings/NAME.md`).
-The selection resolves exactly like `play`. Requires `DEEPGRAM_API_KEY` in
-the environment. `--language` passes a Deepgram language code (default
-`pt-BR`); `--out` writes to a different path. The document pairs YAML
-frontmatter (type, title, resource, timestamp, model, language, duration)
-with the transcript as plain paragraphs — one per speaker turn from
+markdown file next to the recording (`~/recordings/NAME.m4a` →
+`~/recordings/NAME.md`). The selection resolves exactly like `play`. Requires
+`DEEPGRAM_API_KEY` in the environment. `--language` passes a Deepgram
+language code (default `pt-BR`); `--out` writes to a different path. M4A
+files are sent as `audio/mp4`, legacy WAV files as `audio/wav`. The document
+pairs YAML frontmatter (type, title, resource, timestamp, model, language,
+duration) with the transcript as plain paragraphs — one per speaker turn from
 Deepgram's diarization; no timestamps or speaker labels in the text.
 
 ### Interactive mode
@@ -95,7 +98,7 @@ player (`/usr/bin/afplay`).
 ## Development
 
 ```sh
-zig build test              # unit tests (WAV writer, list parser, URL builder, response parsing, OKF rendering, arg parsing)
+zig build test              # unit tests (M4A encoder, list parser, URL builder, response parsing, OKF rendering, arg parsing)
 bash scripts/e2e_smoke.sh    # scripted record -> list -> play smoke test
 ```
 
@@ -106,16 +109,16 @@ see `.github/workflows/release.yml`.
 
 - **Capture** — `src/capture.zig` drives miniaudio's default input device,
   appending PCM frames to a growable buffer until stopped.
-- **WAV** — `src/wav.zig` writes the RIFF header up front and rewrites it on
-  finalize with the real data size; the same module parses duration back out
-  for `list`.
+- **M4A** — `src/m4a.zig` encodes the captured PCM into an M4A/AAC container
+  through AudioToolbox's system encoder (`ExtAudioFile`), and reads durations
+  back out through the system's MP4 parser for `list`.
 - **Library** — `src/library.zig` scans `~/recordings/`, sorts newest-first,
   and formats the table `list` prints.
 - **Playback** — `src/playback.zig` spawns `/usr/bin/afplay` as a child
   process and forwards interrupts instead of reimplementing audio output.
 - **Transcription** — `src/transcribe.zig` shells out to `/usr/bin/curl` to
   reach Deepgram's pre-recorded API; `src/okf.zig` renders the markdown
-  bundle next to the WAV.
+  bundle next to the recording.
 - **TUI** — `src/tui.zig` puts the terminal in raw mode for the interactive
   menu and restores it on any exit path, including Ctrl-C.
 
@@ -125,8 +128,9 @@ See [`docs/SPEC.md`](docs/SPEC.md) for the full functional specification.
 
 - Recordings live outside the repository under `~/recordings/`; build outputs
   (`.zig-cache/`, `zig-out/`) remain git-ignored.
-- WAV is the only supported format; this project targets Apple Silicon macOS
-  only.
+- New recordings are M4A/AAC (~10× smaller than the previous WAV output);
+  WAV files recorded by older versions remain listed, playable and
+  transcribable. This project targets Apple Silicon macOS only.
 
 ## License
 

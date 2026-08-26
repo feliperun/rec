@@ -1,0 +1,33 @@
+name: quality
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Structural quality only. Compile + unit tests require macOS (CoreAudio
+# frameworks) and run in .github/workflows/ci.yml.
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # gate needs the merge base
+
+      - name: Install Sentrux
+        env:
+          SENTRUX_VERSION: v0.5.7
+        run: |
+          mkdir -p "$HOME/.sentrux/bin"
+          curl -fsSL "https://github.com/sentrux/sentrux/releases/download/${SENTRUX_VERSION}/sentrux-linux-x86_64" \
+            -o "$HOME/.sentrux/bin/sentrux"
+          chmod +x "$HOME/.sentrux/bin/sentrux"
+          echo "$HOME/.sentrux/bin" >> "$GITHUB_PATH"
+
+      - name: Sentrux check (absolute rules)
+        run: sentrux check .
+
+      - name: Sentrux gate (no regression)
+        if: github.event_name == 'pull_request'
+        run: sentrux gate .
