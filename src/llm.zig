@@ -44,6 +44,81 @@ pub const Harness = struct {
     }
 };
 
+/// Which Anthropic-compatible backend drives the `claude` harness. `.anthropic`
+/// is Claude's own account; the others mirror the `claudeseek`/`claudezai`
+/// shell functions from ~/.zshrc — same base URL, same env-var contract, same
+/// default models. The API key is never persisted: it is read from the
+/// environment (DEEPSEEK_API_KEY / ZAI_API_KEY) at invocation time, exactly
+/// like those functions do with `$DEEPSEEK_API_KEY`.
+pub const Provider = enum {
+    anthropic,
+    deepseek,
+    zai,
+
+    pub fn label(self: Provider) []const u8 {
+        return switch (self) {
+            .anthropic => "Anthropic (conta padrão do Claude)",
+            .deepseek => "DeepSeek",
+            .zai => "Z.AI GLM",
+        };
+    }
+
+    /// Stable name persisted in config.json.
+    pub fn name(self: Provider) []const u8 {
+        return switch (self) {
+            .anthropic => "anthropic",
+            .deepseek => "deepseek",
+            .zai => "zai",
+        };
+    }
+
+    pub fn parse(raw: []const u8) ?Provider {
+        for (std.meta.tags(Provider)) |p| {
+            if (std.mem.eql(u8, raw, p.name())) return p;
+        }
+        return null;
+    }
+
+    /// Env var that must be exported for this provider to work; null means
+    /// "nothing to export" (Anthropic's own account).
+    pub fn keyEnvName(self: Provider) ?[*:0]const u8 {
+        return switch (self) {
+            .anthropic => null,
+            .deepseek => "DEEPSEEK_API_KEY",
+            .zai => "ZAI_API_KEY",
+        };
+    }
+
+    /// Anthropic-compatible base URL the `claude` binary should talk to.
+    pub fn baseUrl(self: Provider) []const u8 {
+        return switch (self) {
+            .anthropic => unreachable, // only consulted for non-anthropic
+            .deepseek => "https://api.deepseek.com/anthropic",
+            .zai => "https://api.z.ai/api/anthropic",
+        };
+    }
+
+    /// Model used when the config carries no explicit choice ("account
+    /// default"), mirroring the ANTHROPIC_MODEL of claudeseek/claudezai.
+    pub fn defaultModel(self: Provider) []const u8 {
+        return switch (self) {
+            .anthropic => "",
+            .deepseek => "deepseek-v4-flash",
+            .zai => "glm-5.3[1m]",
+        };
+    }
+
+    /// (opus, sonnet, haiku) fallbacks, mirroring the ANTHROPIC_DEFAULT_* of
+    /// claudeseek/claudezai.
+    pub fn modelDefaults(self: Provider) [3][]const u8 {
+        return switch (self) {
+            .anthropic => .{ "", "", "" },
+            .deepseek => .{ "deepseek-v4-pro[1m]", "deepseek-v4-flash", "deepseek-v4-flash" },
+            .zai => .{ "glm-5.3[1m]", "glm-5.3-flash", "glm-4.7" },
+        };
+    }
+};
+
 pub const registry = [_]Harness{
     .{ .kind = .claude, .binary = "claude" },
     .{ .kind = .codex, .binary = "codex" },
@@ -62,6 +137,8 @@ fn harnessOf(kind: Kind) Harness {
 // --- PATH resolution -------------------------------------------------------
 
 extern "c" fn getenv(name: [*:0]const u8) ?[*:0]const u8;
+// The full process environment, for building the child's environ map.
+extern "c" var environ: [*:null]?[*:0]u8;
 
 // libc write/fcntl on the raw pipe fds: std.posix has read() but no partial
 // write() in 0.16, and nonblocking feeding is what lets the poll loop drain
@@ -114,6 +191,8 @@ pub fn findBinary(io: std.Io, gpa: std.mem.Allocator, name: []const u8) ?[]u8 {
 pub const Config = struct {
     harness: Kind,
     model: []const u8 = "",
+    /// Backend behind a `claude` harness; ignored by the other harnesses.
+    provider: Provider = .anthropic,
 };
 
 pub const ConfigError = error{ OutOfMemory, BadJson };
@@ -149,11 +228,13 @@ pub fn configDirPath(home_dir: []const u8, xdg_config_home: ?[]const u8, buf: []
 const ConfigJson = struct {
     harness: ?[]const u8 = null,
     model: ?[]const u8 = null,
+    provider: ?[]const u8 = null,
 };
 
 /// Reads `<config dir>/config.json`. Missing/unreadable ⇒ null (nothing
-/// configured yet); an unknown harness name also yields null so stale configs
-/// can never select something unsupported.
+/// configured yet); an unknown harness or provider name also yields null so
+/// stale configs can never select something unsupported. A missing `provider`
+/// field means the config predates providers and defaults to Anthropic.
 pub fn loadConfig(io: std.Io, gpa: std.mem.Allocator, dir_path: []const u8) ConfigError!?Config {
     var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const path = joinPath(dir_path, "config.json", &buf) orelse return error.OutOfMemory;
@@ -171,9 +252,14 @@ pub fn loadConfig(io: std.Io, gpa: std.mem.Allocator, dir_path: []const u8) Conf
     const harness_name = parsed.value.harness orelse return null;
     for (registry) |h| {
         if (!std.mem.eql(u8, h.binary, harness_name)) continue;
+        const provider = if (parsed.value.provider) |p|
+            Provider.parse(p) orelse return null
+        else
+            .anthropic;
         return .{
             .harness = h.kind,
             .model = try gpa.dupe(u8, parsed.value.model orelse ""),
+            .provider = provider,
         };
     }
     return null;
@@ -194,8 +280,8 @@ pub fn saveConfig(
 
     const doc = try std.fmt.allocPrint(
         gpa,
-        "{{\"harness\":\"{s}\",\"model\":{s}}}\n",
-        .{ harnessOf(config.harness).binary, model_json },
+        "{{\"harness\":\"{s}\",\"model\":{s},\"provider\":\"{s}\"}}\n",
+        .{ harnessOf(config.harness).binary, model_json, config.provider.name() },
     );
     defer gpa.free(doc);
 
@@ -313,10 +399,15 @@ pub fn freeTemplateNames(gpa: std.mem.Allocator, names: *std.ArrayList([]u8)) vo
 
 /// Suggestions offered by `rec setup` for harnesses without a native listing
 /// command. Tiny on purpose: for those, typed free-form ids are the honest
-/// option ("whatever id your account accepts").
-pub fn curatedModels(kind: Kind) []const []const u8 {
+/// option ("whatever id your account accepts"). Claude's suggestions depend
+/// on the provider behind it — the claudeseek/claudezai model sets.
+pub fn curatedModels(kind: Kind, provider: Provider) []const []const u8 {
     return switch (kind) {
-        .claude => &.{ "sonnet", "opus", "haiku" },
+        .claude => switch (provider) {
+            .anthropic => &.{ "sonnet", "opus", "haiku" },
+            .deepseek => &.{ "deepseek-v4-flash", "deepseek-v4-pro[1m]" },
+            .zai => &.{ "glm-5.3[1m]", "glm-5.3-flash", "glm-4.7" },
+        },
         else => &.{},
     };
 }
@@ -405,6 +496,9 @@ pub const InvokeError = error{
     EmptyOutput,
     OutOfMemory,
     NameTooLong,
+    /// The provider's API key env var is not exported (DEEPSEEK_API_KEY /
+    /// ZAI_API_KEY).
+    MissingKey,
 };
 
 /// One PT-BR clause per failure mode, shared by every command that surfaces an
@@ -419,6 +513,7 @@ pub fn failurePhrase(err: InvokeError) []const u8 {
         error.EmptyOutput => "resposta vazia",
         error.OutOfMemory => "sem memória",
         error.NameTooLong => "caminho longo demais",
+        error.MissingKey => "chave de API do provedor não está no ambiente",
     };
 }
 
@@ -443,14 +538,20 @@ pub const probe_timeout_ns: i96 = 90 * std.time.ns_per_s;
 pub const job_timeout_ns: i96 = 30 * 60 * std.time.ns_per_s;
 
 /// A validated LLM execution path: which harness, where its binary lives,
-/// which model ("" = account default). Produced by resolveRunner for every
-/// command that talks to an LLM.
+/// which model ("" = account default), and which provider backs a `claude`
+/// harness. Produced by resolveRunner for every command that talks to an LLM.
 pub const Runner = struct {
     kind: Kind,
     bin_path: []u8,
     model: []const u8,
+    provider: Provider = .anthropic,
 
     pub fn describe(self: Runner, buf: []u8) []const u8 {
+        if (self.provider != .anthropic) {
+            if (self.model.len == 0)
+                return std.fmt.bufPrint(buf, "{s} · {s}", .{ self.kind.label(), self.provider.label() }) catch self.kind.label();
+            return std.fmt.bufPrint(buf, "{s} · {s} ({s})", .{ self.kind.label(), self.provider.label(), self.model }) catch self.kind.label();
+        }
         if (self.model.len == 0)
             return std.fmt.bufPrint(buf, "{s}", .{self.kind.label()}) catch self.kind.label();
         return std.fmt.bufPrint(buf, "{s} · {s}", .{ self.kind.label(), self.model }) catch self.kind.label();
@@ -480,7 +581,7 @@ pub fn resolveRunner(
     const bin = findBinary(io, gpa, harnessOf(cfg.harness).binary) orelse
         return .{ .none = "o binário do harness configurado sumiu do PATH — rode `rec setup`" };
 
-    return .{ .ok = .{ .kind = cfg.harness, .bin_path = bin, .model = cfg.model } };
+    return .{ .ok = .{ .kind = cfg.harness, .bin_path = bin, .model = cfg.model, .provider = cfg.provider } };
 }
 
 /// Runs `prompt` through the harness (`model` == "" means the account's
@@ -495,6 +596,7 @@ pub fn run(
     kind: Kind,
     bin_path: []const u8,
     model: []const u8,
+    provider: Provider,
     prompt: []const u8,
     timeout_ns: i96,
     note_buf: *[max_note_bytes]u8,
@@ -521,11 +623,31 @@ pub fn run(
 
     const argv = buildArgv(arena, kind, bin_path, model, tmp_out_path) catch return error.OutOfMemory;
 
+    // Non-Anthropic providers ride the claude binary the same way the
+    // claudeseek/claudezai shell functions do: point ANTHROPIC_BASE_URL at the
+    // provider and feed it ANTHROPIC_AUTH_TOKEN from the environment. The key
+    // is never stored — it must be exported when rec runs.
+    var environ_map: std.process.Environ.Map = undefined;
+    var provider_env_applied = false;
+    // Function-scoped so it outlives the `if` block: the spawn below reads the
+    // map, and a block-scoped defer would free it first.
+    defer if (provider_env_applied) environ_map.deinit();
+    if (provider != .anthropic and kind == .claude) {
+        const api_key = envValue(provider.keyEnvName().?) orelse return error.MissingKey;
+        environ_map = std.process.Environ.createMap(
+            .{ .block = .{ .slice = std.mem.sliceTo(environ, null) } },
+            gpa,
+        ) catch return error.OutOfMemory;
+        applyProviderEnv(&environ_map, provider, model, api_key) catch return error.OutOfMemory;
+        provider_env_applied = true;
+    }
+
     var child = std.process.spawn(io, .{
         .argv = argv,
         .stdin = .pipe,
         .stdout = .pipe,
         .stderr = .pipe,
+        .environ_map = if (provider_env_applied) &environ_map else null,
     }) catch |err| switch (err) {
         error.FileNotFound => return error.BinaryMissing,
         error.OutOfMemory => return error.OutOfMemory,
@@ -676,6 +798,25 @@ var temp_counter = std.atomic.Value(u32).init(0);
 
 fn nextTempId() u32 {
     return temp_counter.fetchAdd(1, .monotonic);
+}
+
+/// Overlays the env vars claudeseek/claudezai set for their provider onto the
+/// child environment. `model` "" resolves to the provider's own default so the
+/// ANTHROPIC_MODEL slot always points at something the provider accepts.
+fn applyProviderEnv(
+    map: *std.process.Environ.Map,
+    provider: Provider,
+    model: []const u8,
+    api_key: []const u8,
+) std.mem.Allocator.Error!void {
+    const model_eff = if (model.len > 0) model else provider.defaultModel();
+    const defaults = provider.modelDefaults();
+    try map.put("ANTHROPIC_BASE_URL", provider.baseUrl());
+    try map.put("ANTHROPIC_AUTH_TOKEN", api_key);
+    try map.put("ANTHROPIC_MODEL", model_eff);
+    try map.put("ANTHROPIC_DEFAULT_OPUS_MODEL", defaults[0]);
+    try map.put("ANTHROPIC_DEFAULT_SONNET_MODEL", defaults[1]);
+    try map.put("ANTHROPIC_DEFAULT_HAIKU_MODEL", defaults[2]);
 }
 
 /// Child argv per harness. Every entry lives in `arena`, so nothing here needs
@@ -955,4 +1096,39 @@ test "jsonEscape quotes control characters and specials" {
     defer std.testing.allocator.free(e);
     try std.testing.expect(e[e.len - 1] == '"');
     try std.testing.expectEqualStrings("\"a\\\"b\\\\c\\nd\\te\\u0001\"", e);
+}
+
+test "provider names round-trip through parse and name" {
+    for (std.meta.tags(Provider)) |p| {
+        try std.testing.expectEqual(p, Provider.parse(p.name()).?);
+    }
+    try std.testing.expect(Provider.parse("nonexistent") == null);
+    try std.testing.expect(Provider.parse("") == null);
+}
+
+test "provider curated models match the claudeseek/claudezai sets" {
+    const anthropic = curatedModels(.claude, .anthropic);
+    try std.testing.expectEqual(@as(usize, 3), anthropic.len);
+
+    const deepseek = curatedModels(.claude, .deepseek);
+    try std.testing.expectEqualStrings("deepseek-v4-flash", deepseek[0]);
+    try std.testing.expectEqualStrings("deepseek-v4-pro[1m]", deepseek[1]);
+
+    const zai = curatedModels(.claude, .zai);
+    try std.testing.expectEqualStrings("glm-5.3[1m]", zai[0]);
+    try std.testing.expectEqualStrings("glm-5.3-flash", zai[1]);
+    try std.testing.expectEqualStrings("glm-4.7", zai[2]);
+
+    // Non-claude harnesses get no suggestions; the provider is irrelevant.
+    try std.testing.expectEqual(@as(usize, 0), curatedModels(.codex, .deepseek).len);
+}
+
+test "provider defaults and env contract mirror the zshrc functions" {
+    try std.testing.expectEqualStrings("deepseek-v4-flash", Provider.deepseek.defaultModel());
+    try std.testing.expectEqualStrings("https://api.deepseek.com/anthropic", Provider.deepseek.baseUrl());
+    try std.testing.expectEqualStrings("DEEPSEEK_API_KEY", std.mem.span(Provider.deepseek.keyEnvName().?));
+    try std.testing.expectEqualStrings("https://api.z.ai/api/anthropic", Provider.zai.baseUrl());
+    try std.testing.expectEqualStrings("glm-5.3[1m]", Provider.zai.defaultModel());
+    try std.testing.expectEqualStrings("ZAI_API_KEY", std.mem.span(Provider.zai.keyEnvName().?));
+    try std.testing.expect(Provider.anthropic.keyEnvName() == null);
 }

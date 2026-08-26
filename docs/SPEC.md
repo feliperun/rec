@@ -59,6 +59,11 @@ them back — without leaving the terminal and without hand-rolled device code.
   exact combination once more, and persists it to
   `$XDG_CONFIG_HOME/rec/config.json` (default `~/.config/rec/`). An empty
   model means the account default. Re-running changes the choice.
+- A Claude Code setup can additionally pick an **Anthropic-compatible
+  provider**: DeepSeek (`DEEPSEEK_API_KEY`) or Z.AI GLM (`ZAI_API_KEY`), the
+  same override the `claudeseek`/`claudezai` shell functions apply. The key
+  must be exported in the environment — it is never persisted — and rec
+  refuses the provider until the probe succeeds against it.
 
 ### FR7 — Native refinement in transcribe
 - After saving the raw transcript, `rec transcribe` runs it through the

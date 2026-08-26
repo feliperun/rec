@@ -45,7 +45,7 @@ pub fn run(io: std.Io, gpa: std.mem.Allocator, home_dir: []const u8) u8 {
         };
         printOut(io, ": testando chamada real...\n");
 
-        if (ping(io, gpa, h.kind, bin, "")) {
+        if (ping(io, gpa, h.kind, bin, "", .anthropic)) {
             printOut(io, "     ✓ pronto\n");
             candidates.append(gpa, .{ .idx = i, .bin_path = bin }) catch {
                 gpa.free(bin);
@@ -70,7 +70,9 @@ pub fn run(io: std.Io, gpa: std.mem.Allocator, home_dir: []const u8) u8 {
         return 1;
     }
 
-    // Pick a harness; then a model inside a validating loop.
+    // Pick a harness; for claude also a provider (Anthropic, DeepSeek or
+    // Z.AI GLM — same trick as the claudeseek/claudezai shell functions);
+    // then a model inside a validating loop.
     while (true) {
         printOut(io, "\nQual harness deve processar as transcrições?\n");
         for (candidates.items, 1..) |c, n| {
@@ -89,10 +91,55 @@ pub fn run(io: std.Io, gpa: std.mem.Allocator, home_dir: []const u8) u8 {
             continue;
         };
         const chosen = candidates.items[pick - 1];
-        if (!chooseModelAndSave(io, gpa, config_dir, llm.registry[chosen.idx], chosen.bin_path)) {
+        const harness = llm.registry[chosen.idx];
+        const provider = if (harness.kind == .claude)
+            chooseProvider(io) orelse continue
+        else
+            .anthropic;
+        if (!chooseModelAndSave(io, gpa, config_dir, harness, chosen.bin_path, provider)) {
             return 130;
         }
         return 0;
+    }
+}
+
+/// Which backend drives the claude binary. Non-Anthropic providers need their
+/// API key exported in the environment — exactly the prerequisite the
+/// claudeseek/claudezai functions rely on — so the choice is refused here,
+/// with the requirement spelled out, when the key is absent.
+fn chooseProvider(io: std.Io) ?llm.Provider {
+    const options = [_]llm.Provider{ .anthropic, .deepseek, .zai };
+    while (true) {
+        printOut(io, "\nQual provedor usa o Claude Code?\n");
+        for (options, 1..) |p, n| {
+            var row: [160]u8 = undefined;
+            const need = if (p.keyEnvName()) |k| std.fmt.bufPrint(&row, "  {d}. {s} (precisa de {s} no ambiente)\n", .{ n, p.label(), std.mem.span(k) }) catch continue
+            else std.fmt.bufPrint(&row, "  {d}. {s}\n", .{ n, p.label() }) catch continue;
+            printOut(io, need);
+        }
+        printOut(io, "  q. voltar\n");
+
+        var line_buf: [64]u8 = undefined;
+        const line = readLine(&line_buf) orelse return null;
+        if (isQuit(line)) return null;
+
+        const pick = parseChoice(line, options.len) orelse {
+            printOut(io, "Opção inválida.\n");
+            continue;
+        };
+        const p = options[pick - 1];
+        if (p.keyEnvName()) |key| {
+            if (llm.envValue(key) == null) {
+                printOut(io, "\nPara usar ");
+                printOut(io, p.label());
+                printOut(io, " você precisa ter a chave exportada no shell, ex.:\n\n  export ");
+                printOut(io, std.mem.span(key));
+                printOut(io, "=sk-...\n\n");
+                printOut(io, "É a mesma variável que as funções claudeseek/claudezai do seu .zshrc usam.\n");
+                continue;
+            }
+        }
+        return p;
     }
 }
 
@@ -104,6 +151,7 @@ fn chooseModelAndSave(
     config_dir: []const u8,
     harness: llm.Harness,
     bin_path: []const u8,
+    provider: llm.Provider,
 ) bool {
     var listed = llm.listModels(io, gpa, bin_path, harness.kind) catch std.ArrayList([]u8).empty;
     defer llm.freeTemplateNames(gpa, &listed);
@@ -111,6 +159,11 @@ fn chooseModelAndSave(
     while (true) {
         printOut(io, "\nModelos em ");
         printOut(io, harness.label());
+        if (provider != .anthropic) {
+            printOut(io, " (");
+            printOut(io, provider.label());
+            printOut(io, ")");
+        }
         printOut(io, ":\n");
         printOut(io, "  d. padrão da conta do harness\n");
         for (listed.items, 1..) |m, n| {
@@ -120,7 +173,7 @@ fn chooseModelAndSave(
         }
         if (listed.items.len == 0) {
             const offset = listed.items.len + 1;
-            for (llm.curatedModels(harness.kind), 0..) |m, i| {
+            for (llm.curatedModels(harness.kind, provider), 0..) |m, i| {
                 var row: [192]u8 = undefined;
                 const n = offset + i;
                 const row_s = std.fmt.bufPrint(&row, "  {d}. {s}  (sugestão)\n", .{ n, m }) catch continue;
@@ -151,7 +204,7 @@ fn chooseModelAndSave(
             }
             chosen_model = typed;
         } else {
-            const max_choice = listed.items.len + llm.curatedModels(harness.kind).len;
+            const max_choice = listed.items.len + llm.curatedModels(harness.kind, provider).len;
             const pick = parseChoice(line, max_choice) orelse {
                 printOut(io, "Opção inválida.\n");
                 continue;
@@ -159,13 +212,13 @@ fn chooseModelAndSave(
             if (pick <= listed.items.len) {
                 chosen_model = listed.items[pick - 1];
             } else {
-                chosen_model = llm.curatedModels(harness.kind)[pick - listed.items.len - 1];
+                chosen_model = llm.curatedModels(harness.kind, provider)[pick - listed.items.len - 1];
             }
         }
 
         const model_ref = chosen_model.?;
-        if (ping(io, gpa, harness.kind, bin_path, model_ref)) {
-            persist(io, gpa, config_dir, harness.kind, model_ref);
+        if (ping(io, gpa, harness.kind, bin_path, model_ref, provider)) {
+            persist(io, gpa, config_dir, harness.kind, model_ref, provider);
             return true;
         }
         printOut(io, "Escolha outro modelo ou digite um id diferente.\n");
@@ -179,6 +232,7 @@ fn ping(
     kind: llm.Kind,
     bin_path: []const u8,
     model: []const u8,
+    provider: llm.Provider,
 ) bool {
     var note: [llm.max_note_bytes]u8 = undefined;
     var note_len: usize = 0;
@@ -188,6 +242,7 @@ fn ping(
         kind,
         bin_path,
         model,
+        provider,
         probe_prompt,
         llm.probe_timeout_ns,
         &note,
@@ -210,8 +265,8 @@ fn ping(
     }
 }
 
-fn persist(io: std.Io, gpa: std.mem.Allocator, config_dir: []const u8, kind: llm.Kind, model: []const u8) void {
-    llm.saveConfig(io, gpa, config_dir, .{ .harness = kind, .model = model }) catch {
+fn persist(io: std.Io, gpa: std.mem.Allocator, config_dir: []const u8, kind: llm.Kind, model: []const u8, provider: llm.Provider) void {
+    llm.saveConfig(io, gpa, config_dir, .{ .harness = kind, .model = model, .provider = provider }) catch {
         printOut(io, "\nNão consegui gravar ");
         printOut(io, config_dir);
         printOut(io, "/config.json\n");
@@ -221,7 +276,12 @@ fn persist(io: std.Io, gpa: std.mem.Allocator, config_dir: []const u8, kind: llm
     printOut(io, config_dir);
     printOut(io, "/config.json\n");
     printOut(io, "A partir de agora `rec transcribe` refina automaticamente e `rec format`\n");
-    printOut(io, "estrutura transcrições usando este modelo.\n");
+    printOut(io, "estrutura transcrições usando este modelo");
+    if (provider != .anthropic) {
+        printOut(io, " via ");
+        printOut(io, provider.label());
+    }
+    printOut(io, ".\n");
 }
 
 fn hintExample(kind: llm.Kind) []const u8 {
