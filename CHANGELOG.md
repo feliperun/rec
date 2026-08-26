@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.1.1](https://github.com/feliperun/rec/compare/v1.1.0...v1.1.1) (2026-08-26)
+
+
+### Bug Fixes
+
+* store recordings in home directory ([71ca779](https://github.com/feliperun/rec/commit/71ca77982123918021537c41c29222a7c2684d2a))
+
 ## [1.1.0](https://github.com/feliperun/rec/compare/v1.0.1...v1.1.0) (2026-08-26)
 
 
