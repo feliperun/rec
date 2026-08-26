@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.1.2](https://github.com/feliperun/rec/compare/v1.1.1...v1.1.2) (2026-08-26)
+
+
+### Bug Fixes
+
+* pass curl headers with -H so Deepgram receives authorization ([b079af4](https://github.com/feliperun/rec/commit/b079af43c742d4b25833095e17b1ae736639f6d3))
+* pass curl headers with -H so Deepgram receives authorization ([0db98cf](https://github.com/feliperun/rec/commit/0db98cfb4b1ee9cd620eaac7633e165fea6e98af))
+
 ## [1.1.1](https://github.com/feliperun/rec/compare/v1.1.0...v1.1.1) (2026-08-26)
 
 
