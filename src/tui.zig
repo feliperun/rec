@@ -2,7 +2,7 @@ const std = @import("std");
 const capture = @import("capture.zig");
 const library = @import("library.zig");
 const playback = @import("playback.zig");
-const main = @import("main.zig");
+const record = @import("record.zig");
 
 /// Set by the SIGINT handler while the interactive loop owns the terminal.
 var g_sigint = std.atomic.Value(bool).init(false);
@@ -116,7 +116,7 @@ pub fn runInteractive(io: std.Io, gpa: std.mem.Allocator, recordings_path: []con
                 'r' => {
                     digits_len = 0;
                     printStdout(io, "\n");
-                    _ = main.recordOnce(io, gpa, null, true, recordings_path);
+                    _ = record.recordOnce(io, gpa, null, true, recordings_path);
                     // recordOnce installed the plain recording handler.
                     installHandler();
                     printStdout(io, "\n> ");
