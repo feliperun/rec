@@ -50,6 +50,21 @@ Plays a recording through the default output device via `/usr/bin/afplay`.
 The selection can be an index from `list` or a filename (with or without the
 `recordings/` prefix). Ctrl-C stops playback.
 
+### transcribe
+
+```sh
+rec transcribe <index|filename> [--language <code>] [--out <path>]
+```
+
+Transcribes a recording through Deepgram's pre-recorded API and saves an
+[Open Knowledge Format](https://cloud.google.com/blog/products/data-analytics/how-the-open-knowledge-format-can-improve-data-sharing)
+markdown file next to the WAV (`recordings/NAME.wav` → `recordings/NAME.md`).
+The selection resolves exactly like `play`. Requires `DEEPGRAM_API_KEY` in
+the environment. `--language` passes a Deepgram language code (default
+`pt-BR`); `--out` writes to a different path. The document pairs YAML
+frontmatter (type, title, resource, timestamp, model, language, duration)
+with `# Utterances` (timestamped speaker table) and `# Text` sections.
+
 ### Interactive mode
 
 Running `rec` with no subcommand enters a minimal interactive menu:
@@ -79,7 +94,7 @@ player (`/usr/bin/afplay`).
 ## Development
 
 ```sh
-zig build test              # unit tests (WAV writer, list parser)
+zig build test              # unit tests (WAV writer, list parser, URL builder, response parsing, OKF rendering, arg parsing)
 bash scripts/e2e_smoke.sh    # scripted record -> list -> play smoke test
 ```
 
@@ -97,6 +112,9 @@ see `.github/workflows/release.yml`.
   and formats the table `list` prints.
 - **Playback** — `src/playback.zig` spawns `/usr/bin/afplay` as a child
   process and forwards interrupts instead of reimplementing audio output.
+- **Transcription** — `src/transcribe.zig` shells out to `/usr/bin/curl` to
+  reach Deepgram's pre-recorded API; `src/okf.zig` renders the markdown
+  bundle next to the WAV.
 - **TUI** — `src/tui.zig` puts the terminal in raw mode for the interactive
   menu and restores it on any exit path, including Ctrl-C.
 

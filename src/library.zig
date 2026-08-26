@@ -53,6 +53,34 @@ fn entryNewerFirst(_: void, a: Entry, b: Entry) bool {
     return std.mem.order(u8, a.name, b.name) == .gt;
 }
 
+/// Selection → library entry name, shared by `play` and `transcribe`: a
+/// 1-based index over the scanned (newest-first) entries, or a filename with
+/// or without the recordings/ prefix.
+pub fn resolveName(selection: []const u8, entries: []const Entry) ?[]const u8 {
+    if (selection.len > 0 and allDigits(selection)) {
+        const idx = std.fmt.parseInt(usize, selection, 10) catch return null;
+        if (idx < 1 or idx > entries.len) return null;
+        return entries[idx - 1].name;
+    }
+    for (entries) |e| {
+        if (std.mem.eql(u8, e.name, selection)) return e.name;
+    }
+    const with_dir = recordings_dir ++ "/";
+    if (std.mem.startsWith(u8, selection, with_dir)) {
+        for (entries) |e| {
+            if (std.mem.eql(u8, e.name, selection[with_dir.len..])) return e.name;
+        }
+    }
+    return null;
+}
+
+fn allDigits(s: []const u8) bool {
+    for (s) |c| {
+        if (c < '0' or c > '9') return false;
+    }
+    return true;
+}
+
 /// `list`: renders the library table, or the empty state. Returns the exit
 /// code (always 0 unless scanning ran out of memory).
 pub fn listRecordings(io: std.Io, gpa: std.mem.Allocator) u8 {
@@ -313,4 +341,26 @@ test "rejects non-WAV and truncated prefixes" {
     // Non-PCM format.
     img[20] = 3;
     try std.testing.expectEqual(@as(?f64, null), parseDurationPrefix(&img, 44 + 4));
+}
+
+test "resolveName matches index, exact name, stripped prefix, and misses" {
+    // Newest-first, the order `list` numbers entries in.
+    var newest = "20260826-110000.wav".*;
+    var oldest = "20260825-100000.wav".*;
+    var entries = [_]Entry{
+        .{ .name = &newest, .mtime = undefined, .size = 1, .duration_sec = null },
+        .{ .name = &oldest, .mtime = undefined, .size = 2, .duration_sec = null },
+    };
+    _ = &entries;
+
+    try std.testing.expectEqualStrings("20260826-110000.wav", resolveName("1", entries[0..]).?);
+    try std.testing.expectEqualStrings("20260825-100000.wav", resolveName("2", entries[0..]).?);
+    try std.testing.expectEqualStrings("20260825-100000.wav", resolveName("20260825-100000.wav", entries[0..]).?);
+    try std.testing.expectEqualStrings("20260825-100000.wav", resolveName("recordings/20260825-100000.wav", entries[0..]).?);
+
+    // Out-of-range indexes and names that match nothing.
+    try std.testing.expect(resolveName("0", entries[0..]) == null);
+    try std.testing.expect(resolveName("3", entries[0..]) == null);
+    try std.testing.expect(resolveName("missing.wav", entries[0..]) == null);
+    try std.testing.expect(resolveName("recordings/missing.wav", entries[0..]) == null);
 }

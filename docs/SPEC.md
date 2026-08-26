@@ -35,6 +35,17 @@ them back — without leaving the terminal and without hand-rolled device code.
   `r` start recording · `l` list · `<number>` + Enter plays · `q` quit.
 - Raw terminal mode is restored on exit even after Ctrl-C (no broken terminal).
 
+### FR5 — Transcribe
+- `rec transcribe <index|filename>` resolves the selection exactly like
+  `play` and sends the WAV to the Deepgram pre-recorded API through
+  `/usr/bin/curl` as a child process.
+- The transcript is written next to the WAV as **OKF markdown**
+  (`recordings/NAME.wav` → `recordings/NAME.md`); `--language <code>`
+  overrides the Deepgram language (default `pt-BR`) and `--out <path>` moves
+  the artifact elsewhere.
+- Credentials come from the `DEEPGRAM_API_KEY` environment variable; every
+  failure prints a one-line `transcribe: …` error on stderr and exits 1.
+
 ## Non-functional requirements
 
 - **Zig** (stable toolchain installed via Homebrew) — single binary, no
@@ -47,7 +58,7 @@ them back — without leaving the terminal and without hand-rolled device code.
 
 ## Out of scope (MVP)
 
-- Transcription, upload, formats other than WAV, input-device selection UI,
+- Upload, formats other than WAV, input-device selection UI,
 - cross-platform support beyond macOS, full-screen TUI framework.
 
 ## Acceptance (end-to-end)
@@ -56,3 +67,5 @@ them back — without leaving the terminal and without hand-rolled device code.
 2. A scripted smoke run: record ~2 s → `list` shows the file with plausible
    duration → `play` exits 0 → cleanup. Verified with real microphone access
    (already granted to the host terminal).
+3. `rec transcribe <index>` writes an `.md` transcript beside the recording.
+   Verified manually with a live `DEEPGRAM_API_KEY` outside CI.
