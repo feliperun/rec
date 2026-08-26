@@ -1,0 +1,21 @@
+# Sentrux architectural constraints for m4a.
+#
+# Ratchet against the current layout. Tighten thresholds as the codebase grows —
+# never loosen without an ADR (see docs/adr/0003-sentrux-structural-quality-gates.md).
+#
+# Run `sentrux check .` locally before pushing.
+# Run `sentrux gate --save .` before starting a refactor;
+# run `sentrux gate .` before committing it.
+
+[constraints]
+# No import cycles.
+max_cycles = 0
+
+# Keep coupling healthy as the module count grows.
+max_coupling = "B"
+
+# Per-function cyclomatic complexity ceiling.
+max_cc = 25
+
+# Flag new god files early while the repo is small.
+no_god_files = true
