@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.4.0](https://github.com/feliperun/rec/compare/v1.3.0...v1.4.0) (2026-08-26)
+
+
+### Features
+
+* Anthropic-compatible LLM providers (deepseek, zai) ([#13](https://github.com/feliperun/rec/issues/13)) ([690b5bf](https://github.com/feliperun/rec/commit/690b5bfd09fbec5cc8fb4ac93319e06aba4c4766))
+
 ## [1.3.0](https://github.com/feliperun/rec/compare/v1.2.0...v1.3.0) (2026-08-26)
 
 
