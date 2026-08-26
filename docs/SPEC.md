@@ -49,14 +49,49 @@ them back — without leaving the terminal and without hand-rolled device code.
 - Credentials come from the `DEEPGRAM_API_KEY` environment variable; every
   failure prints a one-line `transcribe: …` error on stderr and exits 1.
 
+### FR6 — LLM processing backend (`setup`)
+- A subset of locally installed coding-agent CLIs (Claude Code, Codex CLI,
+  OpenCode, pi, Gemini CLI) doubles as rec's text-processing engine, driven
+  non-interactively with the composed prompt on stdin.
+- `rec setup` (alias `configure-llm`) probes each harness **with a real test
+  call** — file presence alone does not prove auth/quota/plan — lists the
+  usable ones and their available models, asks for a choice, validates that
+  exact combination once more, and persists it to
+  `$XDG_CONFIG_HOME/rec/config.json` (default `~/.config/rec/`). An empty
+  model means the account default. Re-running changes the choice.
+
+### FR7 — Native refinement in transcribe
+- After saving the raw transcript, `rec transcribe` runs it through the
+  bundled **refine** prompt (metalscribe lineage) using the FR6 backend,
+  fixing mistranscribed hard-to-hear words, and rewrites the same `.md`
+  keeping frontmatter.
+- Refinement degrades gracefully: missing config/unusable harness/model
+  failure prints a stderr notice, leaves the raw transcript intact, and
+  still exits 0. `--no-refine` skips it; `--context <text>` forwards domain
+  context.
+
+### FR8 — Format via user templates (`format`)
+- `rec format <index|filename|path>` transforms a transcript markdown using
+  a named prompt template: user-editable files under `<config dir>/templates/`,
+  created on first use from copies embedded in the binary (`meeting` is the
+  structuring template behind the default; `refine` backs FR7). Embedded
+  copies also serve when the directory is missing/read-only; user edits are
+  never overwritten by upgrades. Custom templates can be added freely.
+- Default output name is `<source-stem>.<template>.md` beside the input;
+  `--out` overrides (and refuses to equal the input), `--context` feeds the
+  template's `{{DOMAIN_CONTEXT}}` slot or an appended context section.
+- Formatting hard-requires the FR6 backend (exit 1 with guidance when
+  absent) and reports the saved path on success.
+
 ## Non-functional requirements
 
 - **Zig** (stable toolchain installed via Homebrew) — single binary, no
-  runtime deps beyond the system player.
+  runtime deps beyond the system player and the user's own coding-agent CLI.
 - Audio I/O via **miniaudio** (established single-file C library, vendored at
   `vendor/miniaudio.h`) compiled through `zig cc`; no hand-rolled CoreAudio.
 - `zig build` must succeed with zero warnings-as-errors blockers; tests via
-  `zig build test` cover the M4A encoder and the list parser.
+  `zig build test` cover the M4A encoder, the list parser, prompt
+  composition, config/template naming, and argument parsers.
 - Recordings live under `~/recordings/`, outside the repository; build
   outputs are git-ignored and the repo stays clean.
 

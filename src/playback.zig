@@ -31,6 +31,10 @@ pub fn playSelection(io: std.Io, gpa: std.mem.Allocator, selection: []const u8, 
         return 1;
     }
 
+    // Numeric selections index the newest-first order `list` shows; scan
+    // returns directory order, so normalize before resolving.
+    library.sortNewestFirst(entries.items);
+
     const name = library.resolveName(selection, entries.items) orelse {
         printStderr(io, "play: no recording matches '");
         printStderr(io, selection);

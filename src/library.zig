@@ -93,6 +93,12 @@ fn entryNewerFirst(_: void, a: Entry, b: Entry) bool {
     return std.mem.order(u8, a.name, b.name) == .gt;
 }
 
+/// The order numeric selections refer to; every caller of scan()+resolveName
+/// must apply this before trusting an index.
+pub fn sortNewestFirst(entries: []Entry) void {
+    std.mem.sort(Entry, entries, {}, entryNewerFirst);
+}
+
 /// Selection → library entry name, shared by `play` and `transcribe`: a
 /// 1-based index over the scanned (newest-first) entries, or a filename with
 /// or without the recordings/ prefix.
@@ -137,7 +143,7 @@ pub fn listRecordings(io: std.Io, gpa: std.mem.Allocator, recordings_path: []con
         return 0;
     }
 
-    std.mem.sort(Entry, entries.items, {}, entryNewerFirst);
+    sortNewestFirst(entries.items);
 
     var name_w: usize = "name".len;
     for (entries.items) |e| name_w = @max(name_w, e.name.len);
