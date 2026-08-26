@@ -7,13 +7,14 @@ REPO="$PWD"
 T="$(mktemp -d)"
 trap 'rm -rf "$T"' EXIT
 cd "$T"
+export HOME="$T"
 
 "$REPO/.runs/zig-out/bin/rec" record --duration 2
 
-# exactly one .wav under recordings/
-set -- recordings/*.wav
+# exactly one .wav under ~/recordings/
+set -- "$HOME"/recordings/*.wav
 if [ "$#" -ne 1 ] || [ ! -f "$1" ]; then
-  echo "expected exactly one .wav in $T/recordings, found: $*" >&2
+  echo "expected exactly one .wav in $HOME/recordings, found: $*" >&2
   exit 1
 fi
 

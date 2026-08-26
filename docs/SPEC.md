@@ -13,14 +13,14 @@ them back — without leaving the terminal and without hand-rolled device code.
 - Capture microphone audio and write it to disk as **WAV (PCM 16-bit, 48 kHz,
   stereo)**.
 - One file per recording, named `YYYYMMDD-HHMMSS.wav`, stored under
-  `./recordings/` (created on demand).
+  `~/recordings/` (created on demand).
 - Recording stops on `Ctrl-C` (or `--duration <sec>` when given); the file must
   be finalized with a correct RIFF header even on interrupt.
 - While recording, show elapsed time on the terminal (minimum: a ticking
   `HH:MM:SS` line).
 
 ### FR2 — List
-- `rec list` prints the recordings in `./recordings/` with index,
+- `rec list` prints the recordings in `~/recordings/` with index,
   filename, duration (parsed from the WAV header), and file size.
 - Empty or missing directory prints a friendly empty state, not a crash.
 
@@ -40,7 +40,7 @@ them back — without leaving the terminal and without hand-rolled device code.
   `play` and sends the WAV to the Deepgram pre-recorded API through
   `/usr/bin/curl` as a child process.
 - The transcript is written next to the WAV as **OKF markdown**
-  (`recordings/NAME.wav` → `recordings/NAME.md`); `--language <code>`
+  (`~/recordings/NAME.wav` → `~/recordings/NAME.md`); `--language <code>`
   overrides the Deepgram language (default `pt-BR`) and `--out <path>` moves
   the artifact elsewhere.
 - Credentials come from the `DEEPGRAM_API_KEY` environment variable; every
@@ -54,7 +54,8 @@ them back — without leaving the terminal and without hand-rolled device code.
   `vendor/miniaudio.h`) compiled through `zig cc`; no hand-rolled CoreAudio.
 - `zig build` must succeed with zero warnings-as-errors blockers; tests via
   `zig build test` cover the WAV writer and the list parser.
-- `recordings/` and build outputs are git-ignored; the repo stays clean.
+- Recordings live under `~/recordings/`, outside the repository; build
+  outputs are git-ignored and the repo stays clean.
 
 ## Out of scope (MVP)
 

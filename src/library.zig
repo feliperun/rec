@@ -2,7 +2,31 @@ const std = @import("std");
 
 pub const recordings_dir = "recordings";
 
-/// One row of the library: a WAV under ./recordings/ with its stats and the
+/// Builds the persistent recordings directory ($HOME/recordings).
+/// The returned slice points into buf; no allocation is performed.
+pub fn homeRecordingsPath(home_dir: []const u8, buf: []u8) ?[]const u8 {
+    return recordingPath(home_dir, recordings_dir, buf);
+}
+
+/// Joins a directory and filename into buf, tolerating a trailing slash.
+pub fn recordingPath(dir_path: []const u8, name: []const u8, buf: []u8) ?[]const u8 {
+    if (dir_path.len == 0) return null;
+    const separator_len: usize = if (dir_path[dir_path.len - 1] == '/') 0 else 1;
+    if (dir_path.len > buf.len) return null;
+    const base_len = dir_path.len + separator_len;
+    if (base_len > buf.len or name.len > buf.len - base_len) return null;
+
+    @memcpy(buf[0..dir_path.len], dir_path);
+    var len = dir_path.len;
+    if (separator_len != 0) {
+        buf[len] = '/';
+        len += 1;
+    }
+    @memcpy(buf[len .. len + name.len], name);
+    return buf[0 .. len + name.len];
+}
+
+/// One row of the library: a WAV under $HOME/recordings/ with its stats and the
 /// duration parsed from its header (null when the header is unreadable).
 pub const Entry = struct {
     name: []u8,
@@ -16,11 +40,10 @@ pub fn freeEntries(gpa: std.mem.Allocator, entries: *std.ArrayList(Entry)) void 
     entries.deinit(gpa);
 }
 
-/// Appends every ./recordings/*.wav to `entries` (names owned by `gpa`; the
-/// caller sorts and frees). A missing directory is the empty library, not an
-/// error: `list` renders its empty state and `play` reports no match.
-pub fn scan(io: std.Io, gpa: std.mem.Allocator, entries: *std.ArrayList(Entry)) !void {
-    var dir = std.Io.Dir.cwd().openDir(io, recordings_dir, .{ .iterate = true }) catch return;
+/// Appends every WAV under recordings_path to entries (names owned by gpa).
+/// A missing directory is the empty library, not an error.
+pub fn scan(io: std.Io, gpa: std.mem.Allocator, entries: *std.ArrayList(Entry), recordings_path: []const u8) !void {
+    var dir = std.Io.Dir.cwd().openDir(io, recordings_path, .{ .iterate = true }) catch return;
     defer dir.close(io);
 
     var it = dir.iterate();
@@ -83,11 +106,11 @@ fn allDigits(s: []const u8) bool {
 
 /// `list`: renders the library table, or the empty state. Returns the exit
 /// code (always 0 unless scanning ran out of memory).
-pub fn listRecordings(io: std.Io, gpa: std.mem.Allocator) u8 {
+pub fn listRecordings(io: std.Io, gpa: std.mem.Allocator, recordings_path: []const u8) u8 {
     var entries: std.ArrayList(Entry) = .empty;
     defer freeEntries(gpa, &entries);
 
-    scan(io, gpa, &entries) catch {
+    scan(io, gpa, &entries, recordings_path) catch {
         printStderr(io, "list: out of memory\n");
         return 1;
     };
@@ -363,4 +386,21 @@ test "resolveName matches index, exact name, stripped prefix, and misses" {
     try std.testing.expect(resolveName("3", entries[0..]) == null);
     try std.testing.expect(resolveName("missing.wav", entries[0..]) == null);
     try std.testing.expect(resolveName("recordings/missing.wav", entries[0..]) == null);
+}
+
+test "home recordings path is rooted at HOME" {
+    var buf: [128]u8 = undefined;
+    try std.testing.expectEqualStrings(
+        "/Users/example/recordings",
+        homeRecordingsPath("/Users/example", &buf).?,
+    );
+    try std.testing.expectEqualStrings(
+        "/Users/example/recordings",
+        homeRecordingsPath("/Users/example/", &buf).?,
+    );
+    try std.testing.expectEqualStrings(
+        "/Users/example/recordings/note.wav",
+        recordingPath("/Users/example/recordings", "note.wav", &buf).?,
+    );
+    try std.testing.expect(homeRecordingsPath("", &buf) == null);
 }

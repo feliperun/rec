@@ -53,7 +53,7 @@ fn nextKey() NextKey {
 /// Interactive menu: raw-mode key loop over the record/list/play commands.
 /// The cooked terminal state comes back via the defer and the SIGINT
 /// handler, so the shell is never left broken.
-pub fn runInteractive(io: std.Io, gpa: std.mem.Allocator) u8 {
+pub fn runInteractive(io: std.Io, gpa: std.mem.Allocator, recordings_path: []const u8) u8 {
     // isTty first: tcgetattr on a non-tty can trip "unexpected errno" dumps
     // (macOS reports ENODEV for /dev/null) for what is an ordinary failure.
     const is_tty = std.Io.File.stdin().isTty(io) catch false;
@@ -116,7 +116,7 @@ pub fn runInteractive(io: std.Io, gpa: std.mem.Allocator) u8 {
                 'r' => {
                     digits_len = 0;
                     printStdout(io, "\n");
-                    _ = main.recordOnce(io, gpa, null, true);
+                    _ = main.recordOnce(io, gpa, null, true, recordings_path);
                     // recordOnce installed the plain recording handler.
                     installHandler();
                     printStdout(io, "\n> ");
@@ -124,7 +124,7 @@ pub fn runInteractive(io: std.Io, gpa: std.mem.Allocator) u8 {
                 'l' => {
                     digits_len = 0;
                     printStdout(io, "\n");
-                    _ = library.listRecordings(io, gpa);
+                    _ = library.listRecordings(io, gpa, recordings_path);
                     printStdout(io, "> ");
                 },
                 'q' => {
@@ -134,7 +134,7 @@ pub fn runInteractive(io: std.Io, gpa: std.mem.Allocator) u8 {
                 '\n', '\r' => {
                     if (digits_len == 0) continue;
                     printStdout(io, "\n");
-                    _ = playback.playSelection(io, gpa, digits[0..digits_len]);
+                    _ = playback.playSelection(io, gpa, digits[0..digits_len], recordings_path);
                     digits_len = 0;
                     printStdout(io, "> ");
                 },

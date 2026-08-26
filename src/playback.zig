@@ -18,11 +18,11 @@ fn onSigint(sig: std.posix.SIG) callconv(.c) void {
 /// `play <index|filename>`: resolves the selection against the library and
 /// plays it through the system player. Returns the exit code: afplay's code
 /// is propagated, and a Ctrl-C that took the child down exits 130.
-pub fn playSelection(io: std.Io, gpa: std.mem.Allocator, selection: []const u8) u8 {
+pub fn playSelection(io: std.Io, gpa: std.mem.Allocator, selection: []const u8, recordings_path: []const u8) u8 {
     var entries: std.ArrayList(library.Entry) = .empty;
     defer library.freeEntries(gpa, &entries);
 
-    library.scan(io, gpa, &entries) catch {
+    library.scan(io, gpa, &entries, recordings_path) catch {
         printStderr(io, "play: out of memory\n");
         return 1;
     };
@@ -39,14 +39,16 @@ pub fn playSelection(io: std.Io, gpa: std.mem.Allocator, selection: []const u8) 
     };
 
     var rel_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    var rel_len: usize = 0;
-    appendStr(&rel_buf, &rel_len, library.recordings_dir);
-    appendStr(&rel_buf, &rel_len, "/");
-    appendStr(&rel_buf, &rel_len, name);
+    const recording_path = library.recordingPath(recordings_path, name, &rel_buf) orelse {
+        printStderr(io, "play: cannot resolve recordings/");
+        printStderr(io, name);
+        printStderr(io, "\n");
+        return 1;
+    };
 
     // afplay gets an absolute path so it never depends on our cwd.
     var abs_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const abs_len = std.Io.Dir.cwd().realPathFile(io, rel_buf[0..rel_len], &abs_buf) catch {
+    const abs_len = std.Io.Dir.cwd().realPathFile(io, recording_path, &abs_buf) catch {
         printStderr(io, "play: cannot resolve recordings/");
         printStderr(io, name);
         printStderr(io, "\n");
@@ -98,13 +100,6 @@ pub fn playSelection(io: std.Io, gpa: std.mem.Allocator, selection: []const u8) 
         .signal => |sig| @intCast(@min(@as(u32, 128) + @as(u32, @intCast(@intFromEnum(sig))), 255)),
         .stopped, .unknown => 1,
     };
-}
-
-fn appendStr(buf: []u8, n: *usize, s: []const u8) void {
-    for (s) |ch| {
-        buf[n.*] = ch;
-        n.* += 1;
-    }
 }
 
 fn printStderr(io: std.Io, msg: []const u8) void {

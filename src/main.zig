@@ -10,8 +10,8 @@ const usage =
     \\Usage: rec [command]
     \\
     \\Commands:
-    \\  record [--duration <sec>]  Record audio to ./recordings/
-    \\  list                       List recordings in ./recordings/
+    \\  record [--duration <sec>]  Record audio to ~/recordings/
+    \\  list                       List recordings in ~/recordings/
     \\  play <index|filename>      Play a recording
     \\  transcribe <index|filename>  Transcribe a recording to OKF markdown via Deepgram
     \\
@@ -33,8 +33,17 @@ pub fn main(init: std.process.Init) u8 {
         };
     }
 
+    var recordings_path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const recordings_path = library.homeRecordingsPath(
+        init.minimal.environ.getPosix("HOME") orelse "",
+        &recordings_path_buf,
+    ) orelse {
+        printStderr(io, "rec: cannot determine HOME/recordings directory\n");
+        return 1;
+    };
+
     if (args.items.len < 2) {
-        return tui.runInteractive(io, init.gpa);
+        return tui.runInteractive(io, init.gpa, recordings_path);
     }
 
     const cmd = args.items[1];
@@ -47,8 +56,8 @@ pub fn main(init: std.process.Init) u8 {
                 printStderr(io, usage);
                 return 1;
             },
-            .default => return recordOnce(io, init.gpa, null, false),
-            .duration => |sec| return recordOnce(io, init.gpa, sec, false),
+            .default => return recordOnce(io, init.gpa, null, false, recordings_path),
+            .duration => |sec| return recordOnce(io, init.gpa, sec, false, recordings_path),
         }
     }
 
@@ -57,7 +66,7 @@ pub fn main(init: std.process.Init) u8 {
             printStderr(io, usage);
             return 1;
         }
-        return library.listRecordings(io, init.gpa);
+        return library.listRecordings(io, init.gpa, recordings_path);
     }
 
     if (std.mem.eql(u8, cmd, "play")) {
@@ -65,14 +74,14 @@ pub fn main(init: std.process.Init) u8 {
             printStderr(io, usage);
             return 1;
         }
-        return playback.playSelection(io, init.gpa, rest[0]);
+        return playback.playSelection(io, init.gpa, rest[0], recordings_path);
     }
 
     if (std.mem.eql(u8, cmd, "transcribe")) {
         // One environment lookup here (the only place the raw environ is in
         // scope); transcribeSelection still orders its errors so a bad
         // selection is reported before a missing key.
-        return transcribeSelection(io, init.gpa, rest, init.minimal.environ.getPosix("DEEPGRAM_API_KEY"));
+        return transcribeSelection(io, init.gpa, rest, init.minimal.environ.getPosix("DEEPGRAM_API_KEY"), recordings_path);
     }
 
     printStderr(io, usage);
@@ -146,7 +155,13 @@ fn parseTranscribeArgs(args: []const [:0]const u8) TranscribeArgs {
 /// src/transcribe.zig, and write an OKF markdown transcript next to it.
 /// Human messages go to stderr; stdout stays reserved for `list`. Returns
 /// the exit code.
-pub fn transcribeSelection(io: std.Io, gpa: std.mem.Allocator, args: []const [:0]const u8, api_key: ?[]const u8) u8 {
+pub fn transcribeSelection(
+    io: std.Io,
+    gpa: std.mem.Allocator,
+    args: []const [:0]const u8,
+    api_key: ?[]const u8,
+    recordings_path: []const u8,
+) u8 {
     const ta = switch (parseTranscribeArgs(args)) {
         .invalid => {
             printStderr(io, usage);
@@ -158,7 +173,7 @@ pub fn transcribeSelection(io: std.Io, gpa: std.mem.Allocator, args: []const [:0
     var entries: std.ArrayList(library.Entry) = .empty;
     defer library.freeEntries(gpa, &entries);
 
-    library.scan(io, gpa, &entries) catch {
+    library.scan(io, gpa, &entries, recordings_path) catch {
         printStderr(io, "transcribe: out of memory\n");
         return 1;
     };
@@ -185,28 +200,32 @@ pub fn transcribeSelection(io: std.Io, gpa: std.mem.Allocator, args: []const [:0
 
     // curl gets an absolute path so it never depends on our cwd.
     var rel_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    var rel_len: usize = 0;
-    appendStr(&rel_buf, &rel_len, library.recordings_dir);
-    appendStr(&rel_buf, &rel_len, "/");
-    appendStr(&rel_buf, &rel_len, name);
-
-    var abs_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const abs_len = std.Io.Dir.cwd().realPathFile(io, rel_buf[0..rel_len], &abs_buf) catch {
+    const recording_path = library.recordingPath(recordings_path, name, &rel_buf) orelse {
         printStderr(io, "transcribe: cannot resolve recordings/");
         printStderr(io, name);
         printStderr(io, "\n");
         return 1;
     };
 
-    // Default artifact sits beside the WAV: recordings/NAME.wav -> recordings/NAME.md.
+    var abs_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const abs_len = std.Io.Dir.cwd().realPathFile(io, recording_path, &abs_buf) catch {
+        printStderr(io, "transcribe: cannot resolve recordings/");
+        printStderr(io, name);
+        printStderr(io, "\n");
+        return 1;
+    };
+
+    // Default artifact sits beside the WAV in $HOME/recordings.
     var out_path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     var out_len: usize = 0;
     if (ta.out) |p| {
         appendStr(&out_path_buf, &out_len, p);
     } else {
-        appendStr(&out_path_buf, &out_len, library.recordings_dir);
-        appendStr(&out_path_buf, &out_len, "/");
-        appendStr(&out_path_buf, &out_len, name[0 .. name.len - ".wav".len]);
+        const base = library.recordingPath(recordings_path, name[0 .. name.len - ".wav".len], &out_path_buf) orelse {
+            printStderr(io, "transcribe: cannot write output path\n");
+            return 1;
+        };
+        out_len = base.len;
         appendStr(&out_path_buf, &out_len, ".md");
     }
     const out_path: []const u8 = out_path_buf[0..out_len];
@@ -248,15 +267,11 @@ pub fn transcribeSelection(io: std.Io, gpa: std.mem.Allocator, args: []const [:0
     var ts_buf: [20]u8 = undefined;
     okf.utcTimestamp(&ts_buf);
 
-    var wav_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    var wav_len: usize = 0;
-    appendStr(&wav_buf, &wav_len, library.recordings_dir);
-    appendStr(&wav_buf, &wav_len, "/");
-    appendStr(&wav_buf, &wav_len, name);
-
     const doc = okf.render(gpa, .{
         .title = name[0 .. name.len - ".wav".len],
-        .resource = wav_buf[0..wav_len],
+        // The markdown is a sibling of the WAV, so this remains a valid
+        // relative link regardless of the caller's current directory.
+        .resource = name,
         .timestamp = ts_buf[0..],
         .model = "nova-3",
         .language = ta.language,
@@ -369,26 +384,37 @@ fn installSigintHandler() void {
 }
 
 /// The record command body, shared by the CLI and the interactive 'r' key:
-/// captures the microphone into recordings/YYYYMMDD-HHMMSS.wav until the
+/// captures the microphone into $HOME/recordings/YYYYMMDD-HHMMSS.wav until the
 /// duration elapses, Ctrl-C, or (when `key_stop`) any keypress. Returns the
 /// exit code.
-pub fn recordOnce(io: std.Io, gpa: std.mem.Allocator, duration_sec: ?f64, key_stop: bool) u8 {
+pub fn recordOnce(
+    io: std.Io,
+    gpa: std.mem.Allocator,
+    duration_sec: ?f64,
+    key_stop: bool,
+    recordings_path: []const u8,
+) u8 {
     // Before anything else, so an early Ctrl-C still finalizes a valid file.
     installSigintHandler();
 
-    std.Io.Dir.cwd().createDirPath(io, "recordings") catch {
-        printStderr(io, "record: cannot create recordings/ directory\n");
+    std.Io.Dir.cwd().createDirPath(io, recordings_path) catch {
+        printStderr(io, "record: cannot create ~/recordings/ directory\n");
         return 1;
     };
 
     var name: [15]u8 = undefined;
     localTimestamp(&name);
 
-    var path_buf: [30]u8 = undefined;
-    @memcpy(path_buf[0..11], "recordings/");
-    @memcpy(path_buf[11..26], &name);
-    @memcpy(path_buf[26..30], ".wav");
-    const path: []const u8 = path_buf[0..30];
+    var filename_buf: [19]u8 = undefined;
+    @memcpy(filename_buf[0..15], &name);
+    @memcpy(filename_buf[15..19], ".wav");
+    const filename = filename_buf[0..19];
+
+    var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path = library.recordingPath(recordings_path, filename, &path_buf) orelse {
+        printStderr(io, "record: recording path is too long\n");
+        return 1;
+    };
 
     const file = std.Io.Dir.cwd().createFile(io, path, .{}) catch {
         printStderr(io, "record: cannot open output file\n");

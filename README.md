@@ -25,8 +25,8 @@ Downloads the latest release and installs the `rec` binary to
 rec record [--duration <sec>]
 ```
 
-Records from the default microphone to `./recordings/YYYYMMDD-HHMMSS.wav`
-(PCM 16-bit, 48 kHz, stereo); `recordings/` is created on demand. Without
+Records from the default microphone to `~/recordings/YYYYMMDD-HHMMSS.wav`
+(PCM 16-bit, 48 kHz, stereo); `~/recordings/` is created on demand. Without
 `--duration`, recording stops on Ctrl-C; with `--duration <sec>` it stops
 automatically. The file is always finalized with a correct RIFF header, even
 on interrupt.
@@ -37,7 +37,7 @@ on interrupt.
 rec list
 ```
 
-Prints the recordings in `./recordings/` (newest first) with index,
+Prints the recordings in `~/recordings/` (newest first) with index,
 filename, duration parsed from the WAV header, and file size.
 
 ### play
@@ -58,7 +58,7 @@ rec transcribe <index|filename> [--language <code>] [--out <path>]
 
 Transcribes a recording through Deepgram's pre-recorded API and saves an
 [Open Knowledge Format](https://cloud.google.com/blog/products/data-analytics/how-the-open-knowledge-format-can-improve-data-sharing)
-markdown file next to the WAV (`recordings/NAME.wav` → `recordings/NAME.md`).
+markdown file next to the WAV (`~/recordings/NAME.wav` → `~/recordings/NAME.md`).
 The selection resolves exactly like `play`. Requires `DEEPGRAM_API_KEY` in
 the environment. `--language` passes a Deepgram language code (default
 `pt-BR`); `--out` writes to a different path. The document pairs YAML
@@ -108,7 +108,7 @@ see `.github/workflows/release.yml`.
 - **WAV** — `src/wav.zig` writes the RIFF header up front and rewrites it on
   finalize with the real data size; the same module parses duration back out
   for `list`.
-- **Library** — `src/library.zig` scans `recordings/`, sorts newest-first,
+- **Library** — `src/library.zig` scans `~/recordings/`, sorts newest-first,
   and formats the table `list` prints.
 - **Playback** — `src/playback.zig` spawns `/usr/bin/afplay` as a child
   process and forwards interrupts instead of reimplementing audio output.
@@ -122,8 +122,8 @@ See [`docs/SPEC.md`](docs/SPEC.md) for the full functional specification.
 
 ## Notes
 
-- `recordings/` is git-ignored, together with build outputs (`.zig-cache/`,
-  `zig-out/`).
+- Recordings live outside the repository under `~/recordings/`; build outputs
+  (`.zig-cache/`, `zig-out/`) remain git-ignored.
 - WAV is the only supported format; this project targets Apple Silicon macOS
   only.
 

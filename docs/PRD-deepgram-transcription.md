@@ -21,7 +21,7 @@ WAVs they describe.
 ## User stories
 
 - As a user, I run `rec transcribe 3` (or `rec transcribe 20260825-143000.wav`)
-  and get `recordings/20260825-143000.md` without leaving the terminal.
+  and get `~/recordings/20260825-143000.md` without leaving the terminal.
 - As a user, I open the transcript file in any editor or feed it to an agent;
   the YAML frontmatter tells it what the document is without parsing prose.
 - As a user without a Deepgram key, I get a clear one-line error telling me
