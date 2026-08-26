@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.1.3](https://github.com/feliperun/rec/compare/v1.1.2...v1.1.3) (2026-08-26)
+
+
+### Bug Fixes
+
+* render transcripts as prose paragraphs per speaker turn ([3a1e11c](https://github.com/feliperun/rec/commit/3a1e11c151b6b469bede0c1e085664d72cbd83fe))
+* render transcripts as prose paragraphs per speaker turn ([27f5ff9](https://github.com/feliperun/rec/commit/27f5ff95dd45792a15da18f761bd259ca6320aa3))
+
 ## [1.1.2](https://github.com/feliperun/rec/compare/v1.1.1...v1.1.2) (2026-08-26)
 
 
