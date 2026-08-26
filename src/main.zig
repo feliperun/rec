@@ -413,6 +413,7 @@ fn refineTranscript(
         runner.kind,
         runner.bin_path,
         runner.model,
+        runner.provider,
         prompt_doc,
         llm.job_timeout_ns,
         &note,

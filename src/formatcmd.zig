@@ -184,6 +184,7 @@ pub fn run(
         runner.kind,
         runner.bin_path,
         runner.model,
+        runner.provider,
         composed,
         llm.job_timeout_ns,
         &note,

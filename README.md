@@ -41,6 +41,11 @@ Documento salvo em ~/recordings/20260826-093000.meeting.md
   actually *work* on your machine right now — quota, plan gates and expired
   tokens included — by running a real probe call, never by trusting
   credential files.
+- **Bring your own Anthropic-compatible backend** — a Claude Code setup can
+  ride **DeepSeek** or **Z.AI GLM** instead of Anthropic's own account, using
+  the same `ANTHROPIC_BASE_URL`/`ANTHROPIC_AUTH_TOKEN` trick as the
+  `claudeseek`/`claudezai` shell functions. Your API key is never stored —
+  rec reads it from the environment at call time.
 - **Templates you own** — meeting notes come from an editable prompt file in
   `~/.config/rec/templates/meeting.md`. Change it, rewrite it, add your own
   templates (`retro`, `standup`, whatever) and run them with `--template`.
@@ -58,6 +63,18 @@ Downloads the latest release and installs the `rec` binary to
 
 For transcript processing, install at least one supported coding agent and
 authenticate it the way you normally would, then run `rec setup`.
+
+**Provider prerequisites** — if you want Claude Code to run on DeepSeek or
+Z.AI GLM (the `claudeseek`/`claudezai` trick), export the matching key before
+running rec; `rec setup` refuses the provider until it's present:
+
+```sh
+export DEEPSEEK_API_KEY=sk-...   # DeepSeek provider
+export ZAI_API_KEY=sk-...        # Z.AI GLM provider
+```
+
+No key is ever written to disk: rec only reads it from the environment at
+the moment a call happens.
 
 ## First run
 
@@ -160,7 +177,16 @@ rec setup        # alias: rec configure-llm
 ```
 
 Chooses which coding-agent CLI processes transcripts. Supported today:
-Claude Code, Codex CLI, OpenCode, pi, Gemini CLI. See [First run](#first-run).
+Claude Code, Codex CLI, OpenCode, pi, Gemini CLI. When you pick Claude Code,
+rec also asks which **provider** backs it:
+
+- **Anthropic** — Claude's own account (default);
+- **DeepSeek** — needs `DEEPSEEK_API_KEY` exported;
+- **Z.AI GLM** — needs `ZAI_API_KEY` exported.
+
+The choice is validated with a real call before it's saved to
+`~/.config/rec/config.json`; re-run `rec setup` anytime to switch. See
+[First run](#first-run) for the provider prerequisites.
 
 ### Interactive mode
 
@@ -208,9 +234,12 @@ player; releases are built in `ReleaseFast` mode (see
   non-interactively: the composed prompt streams into the child's stdin
   through a single-thread poll loop (nonblocking feed + deadline), answers
   come back per-harness (Claude/pi/OpenCode stdout, codex `-o` tmpfile,
-  gemini JSON envelope). Config and user templates live under
-  `~/.config/rec/`; `src/setupcmd.zig` and `src/formatcmd.zig` implement
-  `setup` and `format`.
+  gemini JSON envelope). For non-Anthropic providers the child gets an
+  environment overlay — `ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN` (read
+  live from `DEEPSEEK_API_KEY`/`ZAI_API_KEY`), and the provider's default
+  models — mirroring `claudeseek`/`claudezai` exactly. Config and user
+  templates live under `~/.config/rec/`; `src/setupcmd.zig` and
+  `src/formatcmd.zig` implement `setup` and `format`.
 - **Prompts** — `src/prompts.zig` embeds the bundled templates verbatim in
   the binary; composition fills `{{DOMAIN_CONTEXT}}` and delimits the
   transcript payload.
