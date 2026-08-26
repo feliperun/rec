@@ -1,5 +1,18 @@
 # Changelog
 
+## [1.3.0](https://github.com/feliperun/rec/compare/v1.2.0...v1.3.0) (2026-08-26)
+
+
+### Features
+
+* LLM processing pipeline (setup, native refine in transcribe, format) ([7cc825e](https://github.com/feliperun/rec/commit/7cc825e70db763b0eab915da5da014c4b376819c))
+* LLM transcript processing (setup, native refine, format) ([8220748](https://github.com/feliperun/rec/commit/82207481347fa223dc8236bcf24a17132aaf9e73))
+
+
+### Bug Fixes
+
+* resolve numeric selections against newest-first order ([840529a](https://github.com/feliperun/rec/commit/840529af88535243a93f1076f5c9a7294cdf53fa))
+
 ## [1.2.0](https://github.com/feliperun/rec/compare/v1.1.3...v1.2.0) (2026-08-26)
 
 
