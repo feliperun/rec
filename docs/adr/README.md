@@ -1,6 +1,6 @@
 # Architecture Decision Records
 
-Architecture Decision Records (ADRs) for **m4a**.
+Architecture Decision Records (ADRs) for **rec**.
 
 ## Format
 
@@ -50,3 +50,4 @@ proposed → active → superseded
 | [0001](0001-record-architecture-decisions.md) | Record architecture decisions | active |
 | [0002](0002-root-managed-ai-guidance.md) | Root-managed AI guidance files | active |
 | [0003](0003-sentrux-structural-quality-gates.md) | Sentrux structural quality gates | active |
+| [0004](0004-record-natively-in-m4a-aac.md) | Record natively in M4A/AAC instead of WAV | active |

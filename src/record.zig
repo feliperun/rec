@@ -1,11 +1,12 @@
 const std = @import("std");
 const capture = @import("capture.zig");
 const library = @import("library.zig");
+const m4a = @import("m4a.zig");
 
 /// The record command body, shared by the CLI and the interactive 'r' key:
-/// captures the microphone into $HOME/recordings/YYYYMMDD-HHMMSS.wav until the
-/// duration elapses, Ctrl-C, or (when `key_stop`) any keypress. Returns the
-/// exit code.
+/// captures the microphone and encodes $HOME/recordings/YYYYMMDD-HHMMSS.m4a
+/// (AAC) until the duration elapses, Ctrl-C, or (when `key_stop`) any
+/// keypress. Returns the exit code.
 pub fn recordOnce(
     io: std.Io,
     gpa: std.mem.Allocator,
@@ -26,7 +27,7 @@ pub fn recordOnce(
 
     var filename_buf: [19]u8 = undefined;
     @memcpy(filename_buf[0..15], &name);
-    @memcpy(filename_buf[15..19], ".wav");
+    @memcpy(filename_buf[15..19], ".m4a");
     const filename = filename_buf[0..19];
 
     var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
@@ -34,12 +35,6 @@ pub fn recordOnce(
         printStderr(io, "record: recording path is too long\n");
         return 1;
     };
-
-    const file = std.Io.Dir.cwd().createFile(io, path, .{}) catch {
-        printStderr(io, "record: cannot open output file\n");
-        return 1;
-    };
-    defer file.close(io);
 
     var rec = capture.Recorder.init(gpa);
     defer rec.deinit();
@@ -70,15 +65,25 @@ pub fn recordOnce(
     }
 
     rec.stop();
-    const total = rec.writeWav(io, file) catch {
-        printStderr(io, "\nrecord: failed to write WAV data\n");
+
+    // The encoder creates and finalizes the file itself; on failure whatever
+    // partial body it left is removed so the library never lists a corrupt
+    // recording.
+    m4a.encode(path, rec.pcm.items, rec.sample_rate, rec.channels) catch {
+        std.Io.Dir.cwd().deleteFile(io, path) catch {};
+        printStderr(io, "\nrecord: failed to encode M4A audio\n");
+        return 1;
+    };
+    const stat = std.Io.Dir.cwd().statFile(io, path, .{}) catch {
+        printStderr(io, "\nrecord: failed to write M4A audio\n");
         return 1;
     };
 
-    // Summary numbers derived from the bytes actually written.
+    // Duration comes from the PCM actually captured; the size from the
+    // encoded file on disk.
     const byte_rate: u64 = @as(u64, rec.sample_rate) * @as(u64, rec.channels) * 2;
-    const dur_csec: u64 = total * 100 / byte_rate;
-    printSaved(io, path, dur_csec, total);
+    const dur_csec: u64 = @as(u64, rec.pcm.items.len) * 100 / byte_rate;
+    printSaved(io, path, dur_csec, stat.size);
     return 0;
 }
 

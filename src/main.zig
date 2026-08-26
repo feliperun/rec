@@ -151,7 +151,7 @@ fn parseTranscribeArgs(args: []const [:0]const u8) TranscribeArgs {
 }
 
 /// The transcribe command body, shaped like playSelection: resolve the
-/// selection against the library, send the WAV to Deepgram through
+/// selection against the library, send the recording to Deepgram through
 /// src/transcribe.zig, and write an OKF markdown transcript next to it.
 /// Human messages go to stderr; stdout stays reserved for `list`. Returns
 /// the exit code.
@@ -215,13 +215,13 @@ pub fn transcribeSelection(
         return 1;
     };
 
-    // Default artifact sits beside the WAV in $HOME/recordings.
+    // Default artifact sits beside the recording in $HOME/recordings.
     var out_path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     var out_len: usize = 0;
     if (ta.out) |p| {
         record.appendStr(&out_path_buf, &out_len, p);
     } else {
-        const base = library.recordingPath(recordings_path, name[0 .. name.len - ".wav".len], &out_path_buf) orelse {
+        const base = library.recordingPath(recordings_path, stripExt(name), &out_path_buf) orelse {
             printStderr(io, "transcribe: cannot write output path\n");
             return 1;
         };
@@ -268,9 +268,9 @@ pub fn transcribeSelection(
     okf.utcTimestamp(&ts_buf);
 
     const doc = okf.render(gpa, .{
-        .title = name[0 .. name.len - ".wav".len],
-        // The markdown is a sibling of the WAV, so this remains a valid
-        // relative link regardless of the caller's current directory.
+        .title = stripExt(name),
+        // The markdown is a sibling of the recording, so this remains a
+        // valid relative link regardless of the caller's current directory.
         .resource = name,
         .timestamp = ts_buf[0..],
         .model = "nova-3",
@@ -332,7 +332,7 @@ fn printStderr(io: std.Io, msg: []const u8) void {
 }
 
 test {
-    _ = @import("wav.zig");
+    _ = @import("m4a.zig");
     _ = @import("capture.zig");
     _ = @import("record.zig");
     _ = @import("library.zig");
@@ -340,6 +340,20 @@ test {
     _ = @import("tui.zig");
     _ = @import("transcribe.zig");
     _ = @import("okf.zig");
+}
+
+/// A recording's stem: the name without its .m4a/.wav extension, used for
+/// the transcript's title and default output path.
+fn stripExt(name: []const u8) []const u8 {
+    if (std.mem.endsWith(u8, name, ".m4a")) return name[0 .. name.len - ".m4a".len];
+    if (std.mem.endsWith(u8, name, ".wav")) return name[0 .. name.len - ".wav".len];
+    return name;
+}
+
+test "stripExt removes recording extensions only" {
+    try std.testing.expectEqualStrings("20260826-143000", stripExt("20260826-143000.m4a"));
+    try std.testing.expectEqualStrings("20260826-143000", stripExt("20260826-143000.wav"));
+    try std.testing.expectEqualStrings("notes", stripExt("notes"));
 }
 
 // Pure checks of the transcribe argument parser: no I/O, so they stay

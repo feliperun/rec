@@ -109,10 +109,17 @@ pub const TranscribeOutput = struct {
     err_tail_len: usize = 0,
 };
 
-/// POSTs the WAV at `wav_abs_path` to Deepgram and appends the response body
-/// to `out.json`. On error.RequestFailed the tail of curl's stderr is copied
-/// into `out.err_tail` for the caller's one-line message. The key travels
-/// only inside the child's Authorization header; resolving it is the
+/// Deepgram content type for a recording: M4A files are MPEG-4 audio,
+/// legacy WAV files are sent as PCM RIFF.
+pub fn contentTypeFor(name: []const u8) []const u8 {
+    if (std.mem.endsWith(u8, name, ".m4a")) return "audio/mp4";
+    return "audio/wav";
+}
+
+/// POSTs the recording at `wav_abs_path` to Deepgram and appends the response
+/// body to `out.json`. On error.RequestFailed the tail of curl's stderr is
+/// copied into `out.err_tail` for the caller's one-line message. The key
+/// travels only inside the child's Authorization header; resolving it is the
 /// caller's job.
 pub fn transcribe(io: std.Io, gpa: std.mem.Allocator, wav_abs_path: []const u8, api_key: []const u8, language: []const u8, out: *TranscribeOutput) TranscribeError!void {
     const url_buf = gpa.alloc(u8, listenUrlLen(language.len)) catch return error.OutOfMemory;
@@ -133,7 +140,10 @@ pub fn transcribe(io: std.Io, gpa: std.mem.Allocator, wav_abs_path: []const u8, 
         "-H",
         auth_header,
         "-H",
-        "Content-Type: audio/wav",
+        content_type_header: {
+            var buf: [32]u8 = undefined;
+            break :content_type_header std.fmt.bufPrint(&buf, "Content-Type: {s}", .{contentTypeFor(wav_abs_path)}) catch unreachable;
+        },
         "--data-binary",
         data_arg,
         url,
@@ -196,6 +206,11 @@ test "listen url splices custom languages verbatim without reordering" {
         "https://api.deepgram.com/v1/listen?model=nova-3&language=en-US&smart_format=true&punctuate=true&utterances=true&diarize_model=latest&mip_opt_out=true",
         url,
     );
+}
+
+test "content type follows the recording format" {
+    try std.testing.expectEqualStrings("audio/mp4", contentTypeFor("20260826-143000.m4a"));
+    try std.testing.expectEqualStrings("audio/wav", contentTypeFor("20260826-143000.wav"));
 }
 
 // Shaped like a real nova-3 response: metadata envelope, per-word details,

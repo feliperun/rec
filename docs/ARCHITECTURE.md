@@ -7,13 +7,13 @@
 ## High-level flow
 
 ```
-microphone ──miniaudio──▶ PCM frames in memory ──wav.zig──▶ ~/recordings/*.wav
-                                                                  │
-                              library.zig (scan, sort, table) ◀───┤
-                                                                  │
-              playback.zig ──/usr/bin/afplay──▶ speaker ◀──────────┤
-                                                                  │
-              transcribe.zig ──/usr/bin/curl──▶ Deepgram ──▶ okf.zig ──▶ *.md
+microphone ──miniaudio──▶ PCM frames in memory ──m4a.zig (AAC)──▶ ~/recordings/*.m4a
+                                                                        │
+                                   library.zig (scan, sort, table) ◀────┤
+                                                                        │
+                playback.zig ──/usr/bin/afplay──▶ speaker ◀─────────────┤
+                                                                        │
+                transcribe.zig ──/usr/bin/curl──▶ Deepgram ──▶ okf.zig ──▶ *.md
 ```
 
 `main.zig` parses the subcommand and dispatches; `tui.zig` wraps the same
@@ -25,7 +25,8 @@ verbs in a raw-mode interactive menu.
 |--------|----------------|
 | `src/main.zig` | Arg parsing, subcommand dispatch, exit codes |
 | `src/capture.zig` | miniaudio default-input device → growable PCM buffer |
-| `src/wav.zig` | RIFF header write/rewrite on finalize; duration parse for `list` |
+| `src/record.zig` | The record verb: capture loop, naming, encode-on-stop |
+| `src/m4a.zig` | M4A/AAC encode via AudioToolbox's system encoder; container duration parse for `list` |
 | `src/library.zig` | Scans `~/recordings/`, sorts newest-first, formats table |
 | `src/playback.zig` | Spawns `/usr/bin/afplay`, forwards interrupts |
 | `src/transcribe.zig` | Spawns `/usr/bin/curl` against Deepgram pre-recorded API |

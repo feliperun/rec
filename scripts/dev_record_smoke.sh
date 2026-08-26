@@ -11,16 +11,17 @@ export HOME="$T"
 
 "$REPO/.runs/zig-out/bin/rec" record --duration 2
 
-# exactly one .wav under ~/recordings/
-set -- "$HOME"/recordings/*.wav
+# exactly one .m4a under ~/recordings/
+set -- "$HOME"/recordings/*.m4a
 if [ "$#" -ne 1 ] || [ ! -f "$1" ]; then
-  echo "expected exactly one .wav in $HOME/recordings, found: $*" >&2
+  echo "expected exactly one .m4a in $HOME/recordings, found: $*" >&2
   exit 1
 fi
 
 size="$(stat -f %z "$1")"
-if [ "$size" -lt 100000 ]; then
-  echo "wav too small: $size bytes" >&2
+# 2 s of AAC ≈ tens of KiB; silence would still frame out well above this.
+if [ "$size" -lt 4000 ]; then
+  echo "m4a too small: $size bytes" >&2
   exit 1
 fi
 

@@ -93,7 +93,15 @@ Record every failure that cost real debugging time, with the invariant that prev
 it and a link to the ADR or code that must not be undone. Highest-value part of this
 file — keep appending.
 
-- _(none yet)_
+- CoreFoundation's `Boolean` is `UInt8`, **not** C `bool` — declare externs like
+  `CFURLCreateFromFileSystemRepresentation` with a `u8` parameter or the varargs
+  ABI corrupts the call. See `src/m4a.zig` and [ADR 0004](docs/adr/0004-record-natively-in-m4a-aac.md).
+- `ExtAudioFileDispose` is what flushes the MP4 `moov` atom — skipping it after
+  `ExtAudioFileWrite` leaves a headerless body that no player can open.
+- AudioToolbox/CoreFoundation bindings are hand-declared externs whose fourccs
+  were verified against the macOS SDK headers (`xcrun --show-sdk-path`), not
+  `@cImport` — translate-c over Apple framework headers is brittle. Re-verify
+  constants there before adding new ones.
 
 ---
 
