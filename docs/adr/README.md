@@ -51,3 +51,4 @@ proposed → active → superseded
 | [0002](0002-root-managed-ai-guidance.md) | Root-managed AI guidance files | active |
 | [0003](0003-sentrux-structural-quality-gates.md) | Sentrux structural quality gates | active |
 | [0004](0004-record-natively-in-m4a-aac.md) | Record natively in M4A/AAC instead of WAV | active |
+| [0006](0006-decode-and-split-audio-in-process.md) | Decode and split audio in-process | active |

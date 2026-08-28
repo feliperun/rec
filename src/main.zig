@@ -497,15 +497,13 @@ test {
     _ = @import("tui.zig");
     _ = @import("transcribe.zig");
     _ = @import("okf.zig");
+    _ = @import("waveform.zig");
+    _ = @import("split.zig");
 }
 
 /// A recording's stem: the name without its .m4a/.wav extension, used for
 /// the transcript's title and default output path.
-fn stripExt(name: []const u8) []const u8 {
-    if (std.mem.endsWith(u8, name, ".m4a")) return name[0 .. name.len - ".m4a".len];
-    if (std.mem.endsWith(u8, name, ".wav")) return name[0 .. name.len - ".wav".len];
-    return name;
-}
+const stripExt = library.stripExt;
 
 test "stripExt removes recording extensions only" {
     try std.testing.expectEqualStrings("20260826-143000", stripExt("20260826-143000.m4a"));

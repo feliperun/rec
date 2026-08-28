@@ -9,6 +9,7 @@ pub const M4aError = error{
     CreateFailed,
     SetPropertyFailed,
     WriteFailed,
+    ReadFailed,
     InvalidPcm,
 };
 
@@ -83,7 +84,16 @@ extern "c" fn ExtAudioFileWrite(
     in_num_frames: u32,
     io_data: *const AudioBufferList,
 ) OSStatus;
+extern "c" fn ExtAudioFileRead(
+    in_file: ExtAudioFileRef,
+    io_num_frames: *u32,
+    io_data: *AudioBufferList,
+) OSStatus;
 extern "c" fn ExtAudioFileDispose(in_file: ExtAudioFileRef) OSStatus;
+extern "c" fn ExtAudioFileOpenURL(
+    in_url: CFURLRef,
+    out_file: *ExtAudioFileRef,
+) OSStatus;
 extern "c" fn AudioFileOpenURL(
     in_file: CFURLRef,
     in_permissions: i8,
@@ -167,10 +177,80 @@ pub fn encode(path: []const u8, pcm: []const u8, sample_rate: u32, channels: u32
     if (ExtAudioFileWrite(out, frames, &buffers) != 0) return error.WriteFailed;
 }
 
+/// Decoded audio in the project's canonical PCM format: interleaved s16le
+/// at 48 kHz stereo, whatever the file's own encoding — the ExtAudioFile
+/// converter resamples/remixes on the way in. `pcm` is owned by the caller.
+pub const Decoded = struct {
+    pcm: []u8,
+    sample_rate: u32,
+    channels: u32,
+};
+
+pub const decode_sample_rate: u32 = 48000;
+pub const decode_channels: u32 = 2;
+
+/// Decodes the M4A at `path` into canonical PCM via ExtAudioFileRead, for
+/// the waveform view and splitting. Read errors surface as `M4aError`;
+/// allocation failures as `OutOfMemory`.
+pub fn decode(gpa: std.mem.Allocator, path: []const u8) (M4aError || std.mem.Allocator.Error)!Decoded {
+    const url = fileUrl(path) orelse return error.CreateFailed;
+    defer CFRelease(url);
+
+    var file: ExtAudioFileRef = null;
+    if (ExtAudioFileOpenURL(url, &file) != 0) return error.CreateFailed;
+    defer _ = ExtAudioFileDispose(file);
+
+    // Client format: the PCM every consumer in this project speaks; the
+    // converter between it and the file's AAC is the system's.
+    const client_desc = AudioStreamBasicDescription{
+        .sample_rate = @floatFromInt(decode_sample_rate),
+        .format_id = fcc("lpcm"),
+        .format_flags = (1 << 2) | (1 << 3), // IsSignedInteger | IsPacked
+        .bytes_per_packet = decode_channels * 2,
+        .frames_per_packet = 1,
+        .bytes_per_frame = decode_channels * 2,
+        .channels_per_frame = decode_channels,
+        .bits_per_channel = 16,
+        .reserved = 0,
+    };
+    if (ExtAudioFileSetProperty(file, fcc("cfmt"), @sizeOf(AudioStreamBasicDescription), &client_desc) != 0) {
+        return error.SetPropertyFailed;
+    }
+
+    var pcm: std.ArrayList(u8) = .empty;
+    errdefer pcm.deinit(gpa);
+
+    // 1 s of audio per read: enough to keep the loop short without a
+    // per-call allocation sized to the whole file.
+    const frames_per_read: u32 = decode_sample_rate;
+    const read_buf = try gpa.alloc(u8, @as(usize, frames_per_read) * decode_channels * 2);
+    defer gpa.free(read_buf);
+
+    while (true) {
+        var frames: u32 = frames_per_read;
+        var buffers = AudioBufferList{
+            .number_buffers = 1,
+            .buffers = .{.{
+                .number_channels = decode_channels,
+                .data_byte_size = @intCast(read_buf.len),
+                .data = read_buf.ptr,
+            }},
+        };
+        if (ExtAudioFileRead(file, &frames, &buffers) != 0) return error.ReadFailed;
+        if (frames == 0) break; // end of file
+        try pcm.appendSlice(gpa, read_buf[0 .. @as(usize, frames) * decode_channels * 2]);
+    }
+
+    return .{
+        .pcm = try pcm.toOwnedSlice(gpa),
+        .sample_rate = decode_sample_rate,
+        .channels = decode_channels,
+    };
+}
+
 /// Duration of the M4A at `path` in seconds, via the system's MP4 parser;
 /// null when the file cannot be opened or probed.
-pub fn durationSec(path: []const u8) ?f64 {
-    const url = fileUrl(path) orelse return null;
+pub fn durationSec(path: []const u8) ?f64 {    const url = fileUrl(path) orelse return null;
     defer CFRelease(url);
 
     var file: AudioFileID = null;
@@ -213,23 +293,10 @@ test "encode writes an M4A whose duration parses back" {
     const path = testPath(&path_buf, ".m4a");
     defer _ = unlink(path);
 
-    // 0.5 s of a square wave at 48 kHz stereo — energy in every frame, so
-    // the encoder has real work to do (silence would be a weaker probe).
-    const sample_rate: usize = 48000;
-    const frames: usize = sample_rate / 2;
-    var pcm: std.ArrayList(u8) = .empty;
+    // A square wave — energy in every frame, so the encoder has real work
+    // to do (silence would be a weaker probe).
+    var pcm = try testSquareWave(std.testing.allocator);
     defer pcm.deinit(std.testing.allocator);
-    try pcm.ensureTotalCapacity(std.testing.allocator, frames * 4);
-
-    var frame: usize = 0;
-    while (frame < frames) : (frame += 1) {
-        const level: u16 = if (frame % 110 < 55) 8000 else @as(u16, @bitCast(@as(i16, -8000)));
-        var frame_bytes: [4]u8 = undefined;
-        for (0..2) |ch| {
-            std.mem.writeInt(u16, frame_bytes[ch * 2 ..][0..2], level, .little);
-        }
-        pcm.appendSliceAssumeCapacity(&frame_bytes);
-    }
 
     try encode(std.mem.sliceTo(path, 0), pcm.items, 48000, 2);
 
@@ -246,4 +313,57 @@ test "durationSec rejects missing files and non-M4A content" {
     defer _ = unlink(path);
     writeTestFile(path, "definitely not an audio file");
     try std.testing.expect(durationSec(std.mem.sliceTo(path, 0)) == null);
+}
+
+/// The 0.5 s 48 kHz stereo square wave shared by the encode/decode tests.
+fn testSquareWave(gpa: std.mem.Allocator) !std.ArrayList(u8) {
+    const sample_rate: usize = 48000;
+    const frames: usize = sample_rate / 2;
+    var pcm: std.ArrayList(u8) = .empty;
+    errdefer pcm.deinit(gpa);
+    try pcm.ensureTotalCapacity(gpa, frames * 4);
+
+    var frame: usize = 0;
+    while (frame < frames) : (frame += 1) {
+        const level: u16 = if (frame % 110 < 55) 8000 else @as(u16, @bitCast(@as(i16, -8000)));
+        var frame_bytes: [4]u8 = undefined;
+        for (0..2) |ch| {
+            std.mem.writeInt(u16, frame_bytes[ch * 2 ..][0..2], level, .little);
+        }
+        pcm.appendSliceAssumeCapacity(&frame_bytes);
+    }
+    return pcm;
+}
+
+test "decode returns the encoded audio back at the canonical format" {
+    var path_buf: [64]u8 = undefined;
+    const path = testPath(&path_buf, "-roundtrip.m4a");
+    defer _ = unlink(path);
+
+    var pcm = try testSquareWave(std.testing.allocator);
+    defer pcm.deinit(std.testing.allocator);
+    try encode(std.mem.sliceTo(path, 0), pcm.items, 48000, 2);
+
+    var d = try decode(std.testing.allocator, std.mem.sliceTo(path, 0));
+    defer std.testing.allocator.free(d.pcm);
+    try std.testing.expectEqual(@as(u32, 48000), d.sample_rate);
+    try std.testing.expectEqual(@as(u32, 2), d.channels);
+
+    // AAC priming/padding shifts the decoded body by at most a couple of
+    // 1024-frame packets against the source PCM.
+    const diff = @abs(@as(isize, @intCast(d.pcm.len)) - @as(isize, @intCast(pcm.items.len)));
+    try std.testing.expect(diff <= 2 * 1024 * 4);
+
+    // The wave survives: energy near the source's ±8000 peak.
+    var peak: u16 = 0;
+    var off: usize = 0;
+    while (off + 2 <= d.pcm.len) : (off += 2) {
+        const s = std.mem.readInt(i16, d.pcm[off..][0..2], .little);
+        peak = @max(peak, @as(u16, @intCast(@abs(@as(i32, s)))));
+    }
+    try std.testing.expect(peak > 4000);
+}
+
+test "decode rejects missing files" {
+    try std.testing.expectError(error.CreateFailed, decode(std.testing.allocator, "/tmp/rec-m4a-test-nonexistent.m4a"));
 }

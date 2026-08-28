@@ -25,6 +25,11 @@ pub const Recorder = struct {
     ctx: ma.ma_context,
     device: ma.ma_device,
     pcm: std.ArrayList(u8),
+    /// Guards `pcm` between the audio callback's appends and readers on the
+    /// main thread (an append may reallocate the buffer under them). A
+    /// spinlock, because the critical section is a short append or copy and
+    /// the callback must never block.
+    pcm_lock: std.atomic.Mutex = .unlocked,
     frames_written: std.atomic.Value(u64),
     sample_rate: u32,
     channels: u16,
@@ -84,6 +89,27 @@ pub const Recorder = struct {
         return self.pcm.items.len;
     }
 
+    /// Copies the PCM appended since `*consumed` into `out` (replacing its
+    /// contents) under the append lock, then advances `*consumed`. This is
+    /// how the main thread watches the recording grow while the audio
+    /// callback owns the buffer.
+    pub fn takeNewPcm(self: *Recorder, out: *std.ArrayList(u8), consumed: *usize) void {
+        // Skip the tick if the callback holds the lock; `consumed` does not
+        // advance, so the next tick copies everything appended since then.
+        if (!self.pcm_lock.tryLock()) return;
+        defer self.pcm_lock.unlock();
+        if (self.pcm.items.len <= consumed.*) {
+            out.clearRetainingCapacity();
+            return;
+        }
+        const slice = self.pcm.items[consumed.*..];
+        out.replaceRange(self.gpa, 0, out.items.len, slice) catch {
+            out.clearRetainingCapacity();
+            return;
+        };
+        consumed.* = self.pcm.items.len;
+    }
+
     pub fn deinit(self: *Recorder) void {
         if (self.started) {
             _ = ma.ma_device_stop(&self.device);
@@ -109,8 +135,34 @@ fn dataCallback(
     // Interleaved s16 frames: 2 bytes per sample, `channels` samples per frame.
     const bytes = frame_count * @as(ma.ma_uint32, self.channels) * 2;
     const src: [*]const u8 = @ptrCast(input);
-    // On allocation failure the callback drops the block rather than blocking
-    // the audio thread; recordings here are short enough for that to be moot.
+    // On contention the callback drops the block rather than blocking the
+    // audio thread; recordings here are short enough for that to be moot.
+    if (!self.pcm_lock.tryLock()) return;
+    defer self.pcm_lock.unlock();
     self.pcm.appendSlice(self.gpa, src[0..bytes]) catch return;
     _ = self.frames_written.fetchAdd(frame_count, .monotonic);
+}
+
+test "takeNewPcm drains each append exactly once" {
+    var rec = Recorder.init(std.testing.allocator);
+    defer rec.deinit();
+    try rec.pcm.appendSlice(std.testing.allocator, &.{ 1, 2, 3, 4 });
+
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(std.testing.allocator);
+    var consumed: usize = 0;
+
+    rec.takeNewPcm(&out, &consumed);
+    try std.testing.expectEqualSlices(u8, &.{ 1, 2, 3, 4 }, out.items);
+    try std.testing.expectEqual(@as(usize, 4), consumed);
+
+    // Nothing new: out is cleared, consumed stays put.
+    rec.takeNewPcm(&out, &consumed);
+    try std.testing.expectEqual(@as(usize, 0), out.items.len);
+    try std.testing.expectEqual(@as(usize, 4), consumed);
+
+    // More audio arrives: only the new bytes come out.
+    try rec.pcm.appendSlice(std.testing.allocator, &.{ 5, 6, 7, 8 });
+    rec.takeNewPcm(&out, &consumed);
+    try std.testing.expectEqualSlices(u8, &.{ 5, 6, 7, 8 }, out.items);
 }

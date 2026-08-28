@@ -127,6 +127,13 @@ fn allDigits(s: []const u8) bool {
     return true;
 }
 
+/// A recording's stem: the name without its .m4a/.wav extension.
+pub fn stripExt(name: []const u8) []const u8 {
+    if (std.mem.endsWith(u8, name, ".m4a")) return name[0 .. name.len - ".m4a".len];
+    if (std.mem.endsWith(u8, name, ".wav")) return name[0 .. name.len - ".wav".len];
+    return name;
+}
+
 /// `list`: renders the library table, or the empty state. Returns the exit
 /// code (always 0 unless scanning ran out of memory).
 pub fn listRecordings(io: std.Io, gpa: std.mem.Allocator, recordings_path: []const u8) u8 {

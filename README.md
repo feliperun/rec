@@ -100,8 +100,9 @@ rec record [--duration <sec>]
 Records from the default microphone to `~/recordings/YYYYMMDD-HHMMSS.m4a`
 (AAC-LC, 48 kHz, stereo, via AudioToolbox); `~/recordings/` is created on
 demand. Without `--duration`, recording stops on Ctrl-C; with `--duration
-<sec>` it stops automatically. The container is always finalized — a failed
-encode leaves no partial file behind.
+<sec>` it stops automatically. On a terminal, a live waveform bar shows the
+recording growing in real time. The container is always finalized — a
+failed encode leaves no partial file behind.
 
 ### list
 
@@ -121,7 +122,19 @@ rec play <index|filename>
 
 Plays a recording through the default output device via `/usr/bin/afplay`.
 The selection can be an index from `list` or a filename (with or without the
-`recordings/` prefix). Ctrl-C stops playback.
+`recordings/` prefix).
+
+On a terminal, playback is interactive: a live waveform bar shows the
+playback position, and when the recording has a transcript (`NAME.md`) it is
+printed in full first. Keys:
+
+| Key | Action |
+|-----|--------|
+| `SPACE` | Pause / resume |
+| `S` | Split the recording at the current position into `NAME-part1.m4a` / `NAME-part2.m4a` (the original is removed) |
+| `Q` / `Ctrl-C` | Stop playback |
+
+Off a terminal (piped output), playback is plain `afplay`; `Ctrl-C` stops it.
 
 ### transcribe
 

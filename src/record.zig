@@ -2,6 +2,7 @@ const std = @import("std");
 const capture = @import("capture.zig");
 const library = @import("library.zig");
 const m4a = @import("m4a.zig");
+const waveform = @import("waveform.zig");
 
 /// The record command body, shared by the CLI and the interactive 'r' key:
 /// captures the microphone and encodes $HOME/recordings/YYYYMMDD-HHMMSS.m4a
@@ -53,6 +54,18 @@ pub fn recordOnce(
     else
         null;
 
+    // The live view: peaks accumulate from whatever the audio thread has
+    // appended since the last tick, and one line carries the timer and the
+    // growing bar.
+    const byte_rate: u64 = @as(u64, rec.sample_rate) * rec.channels * 2;
+    var tracker = waveform.PeakTracker.init(gpa, waveform.peakBlockBytes(byte_rate));
+    defer tracker.deinit();
+    var new_pcm: std.ArrayList(u8) = .empty;
+    defer new_pcm.deinit(gpa);
+    var view: std.ArrayList(waveform.Peak) = .empty;
+    defer view.deinit(gpa);
+    var consumed: usize = 0;
+
     while (true) {
         const now = std.Io.Timestamp.now(io, .awake);
         if (capture.stopRequested()) break;
@@ -60,28 +73,32 @@ pub fn recordOnce(
             if (now.nanoseconds >= d.nanoseconds) break;
         }
         if (key_stop and stdinKeyPending()) break;
-        printElapsed(io, now.nanoseconds - started_at.nanoseconds);
+
+        rec.takeNewPcm(&new_pcm, &consumed);
+        tracker.feed(new_pcm.items);
+        const secs: u32 = @intCast(@divTrunc(now.nanoseconds - started_at.nanoseconds, std.time.ns_per_s));
+        printLiveLine(io, secs, tracker.view(&view) catch &.{});
         io.sleep(.fromMilliseconds(100), .awake) catch {};
     }
 
     rec.stop();
+    printStderr(io, "\r\x1b[K"); // clear the live line for the summary below
 
     // The encoder creates and finalizes the file itself; on failure whatever
     // partial body it left is removed so the library never lists a corrupt
     // recording.
     m4a.encode(path, rec.pcm.items, rec.sample_rate, rec.channels) catch {
         std.Io.Dir.cwd().deleteFile(io, path) catch {};
-        printStderr(io, "\nrecord: failed to encode M4A audio\n");
+        printStderr(io, "record: failed to encode M4A audio\n");
         return 1;
     };
     const stat = std.Io.Dir.cwd().statFile(io, path, .{}) catch {
-        printStderr(io, "\nrecord: failed to write M4A audio\n");
+        printStderr(io, "record: failed to write M4A audio\n");
         return 1;
     };
 
     // Duration comes from the PCM actually captured; the size from the
     // encoded file on disk.
-    const byte_rate: u64 = @as(u64, rec.sample_rate) * @as(u64, rec.channels) * 2;
     const dur_csec: u64 = @as(u64, rec.pcm.items.len) * 100 / byte_rate;
     printSaved(io, path, dur_csec, stat.size);
     return 0;
@@ -154,21 +171,36 @@ fn durationNanoseconds(sec: f64) i96 {
     return @intFromFloat(clamped * 1_000_000_000.0);
 }
 
-/// Single-line elapsed timer on stderr, refreshed with a carriage return;
-/// called ~10x/s so it ticks at least once per second.
-fn printElapsed(io: std.Io, elapsed_ns: i96) void {
-    const secs: u32 = @intCast(@divTrunc(elapsed_ns, std.time.ns_per_s));
-    var buf: [12]u8 = undefined;
-    buf[0] = '\r';
-    buf[1] = ' ';
-    put2(buf[2..4], (secs / 3600) % 100);
-    buf[4] = ':';
-    put2(buf[5..7], (secs / 60) % 60);
-    buf[7] = ':';
-    put2(buf[8..10], secs % 60);
-    buf[10] = ' ';
-    buf[11] = ' ';
-    printStderr(io, buf[0..]);
+/// The live recording line: carriage return, timer, and the growing
+/// waveform bar filling the rest of `width`, all bright. Composed in one
+/// pass for a single write per tick.
+fn composeLiveLine(buf: []u8, secs: u32, peaks: []const waveform.Peak, width: usize) []const u8 {
+    var n: usize = 0;
+    appendStr(buf, &n, "\r ⏺ ");
+    const hours = secs / 3600;
+    if (hours > 0) {
+        appendUint(buf, &n, hours);
+        buf[n] = ':';
+        n += 1;
+        put2(buf[n..][0..2], (secs / 60) % 60);
+        n += 2;
+    } else {
+        put2(buf[n..][0..2], (secs / 60) % 60);
+        n += 2;
+    }
+    buf[n] = ':';
+    n += 1;
+    put2(buf[n..][0..2], secs % 60);
+    n += 2;
+    appendStr(buf, &n, " ");
+    const bar_width = @min(width -| n, 300);
+    n += @intCast(waveform.renderBar(peaks, bar_width, bar_width, buf[n..]).len);
+    return buf[0..n];
+}
+
+fn printLiveLine(io: std.Io, secs: u32, peaks: []const waveform.Peak) void {
+    var buf: [1024]u8 = undefined;
+    printStderr(io, composeLiveLine(&buf, secs, peaks, waveform.termWidth()));
 }
 
 fn printSaved(io: std.Io, path: []const u8, dur_csec: u64, bytes: u64) void {
@@ -238,4 +270,25 @@ fn stdinKeyPending() bool {
 
 fn printStderr(io: std.Io, msg: []const u8) void {
     std.Io.File.writeStreamingAll(.stderr(), io, msg) catch {};
+}
+
+test "composeLiveLine draws the timer and a growing bar" {
+    var buf: [1024]u8 = undefined;
+    // Levels 0,2,4,6,7 on the first five columns; the rest is silence.
+    const peaks = [_]waveform.Peak{ 0, 8192, 16384, 24576, 32767 };
+    const line = composeLiveLine(&buf, 5, &peaks, 20);
+    try std.testing.expectEqualStrings("\r ⏺ 00:05 ▁▃▅▇█▁▁▁", line);
+}
+
+test "composeLiveLine switches to H:MM:SS past an hour" {
+    var buf: [1024]u8 = undefined;
+    // 6 chars of "⏺ " prefix + 8 chars of "1:01:01 " → 26 bar columns.
+    const line = composeLiveLine(&buf, 3661, &.{}, 40);
+    try std.testing.expectEqualStrings("\r ⏺ 1:01:01 ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁", line);
+}
+
+test "composeLiveLine clamps the bar on a narrow terminal" {
+    var buf: [64]u8 = undefined;
+    const line = composeLiveLine(&buf, 5, &.{}, 8);
+    try std.testing.expectEqualStrings("\r ⏺ 00:05 ", line);
 }

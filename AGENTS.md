@@ -102,6 +102,13 @@ file — keep appending.
   were verified against the macOS SDK headers (`xcrun --show-sdk-path`), not
   `@cImport` — translate-c over Apple framework headers is brittle. Re-verify
   constants there before adding new ones.
+- Zig `defer` runs at the **end of the enclosing block**, not the end of the
+  function — a `defer gpa.free(x)` inside an `if` block frees at the `}`.
+  Anything that aliases inside `x` (a `pcm` slice pointing into a freed
+  WAV image) goes dangling silently and crashes later in libc, e.g.
+  `CrashIfClientProvidedBogusAudioBufferList`. Hoist frees to function scope
+  and keep the image alive for the whole scope that uses it. See [ADR 0006](docs/adr/0006-decode-and-split-audio-in-process.md)
+  and `src/split.zig`.
 
 ---
 
