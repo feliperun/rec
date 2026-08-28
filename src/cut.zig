@@ -1,37 +1,57 @@
-//! Splitting a recording in two at a playback position: load the audio as
-//! PCM (native M4A decode or direct WAV parse), cut at a frame boundary,
-//! write `<stem>-part1.m4a`/`<stem>-part2.m4a` beside it, drop the original.
+//! Cutting a marked interval out of a recording: load the audio as PCM
+//! (native M4A decode or direct WAV parse), remove the span at frame
+//! boundaries, re-encode what remains into one M4A and replace the original
+//! (a legacy .wav is replaced by the M4A cut beside it).
 
 const std = @import("std");
 const library = @import("library.zig");
 const m4a = @import("m4a.zig");
 
-pub const SplitError = error{
+pub const CutError = error{
     CannotDecode,
     CannotWrite,
+    NothingToCut,
     OutOfMemory,
 };
 
-pub const Parts = struct {
-    first: []const u8,
-    second: []const u8,
+/// The frame-aligned PCM that survives cutting `[start_sec, end_sec)` out of
+/// `pcm` (interleaved s16le): `head` is the audio before the span, `tail`
+/// the audio after it. Positions outside the audio clamp to its edges; an
+/// empty or inverted span cuts nothing — the whole body comes back as the
+/// head and the caller reports `NothingToCut`.
+pub const Remainder = struct {
+    head: []const u8,
+    tail: []const u8,
 };
 
-/// Cuts `pcm` (interleaved s16le) at `pos_sec` into two frame-aligned parts.
-/// Positions outside the audio clamp to its edges.
-pub fn splitPcm(pcm: []const u8, channels: u32, sample_rate: u32, pos_sec: f64) Parts {
+/// Removes `[start_sec, end_sec)` from `pcm` (interleaved s16le) at frame
+/// boundaries. Positions outside the audio clamp to its edges.
+pub fn cutPcm(pcm: []const u8, channels: u32, sample_rate: u32, start_sec: f64, end_sec: f64) Remainder {
     const bytes_per_frame: usize = @max(@as(usize, channels) * 2, 1);
-    const byte_rate: u64 = @as(u64, sample_rate) * channels * 2;
+    const byte_rate = @as(f64, @floatFromInt(sample_rate)) * @as(f64, @floatFromInt(channels)) * 2.0;
+    const pcm_len = @as(f64, @floatFromInt(pcm.len));
 
-    if (pos_sec <= 0 or byte_rate == 0) return .{ .first = pcm[0..0], .second = pcm };
-    const offset_f = pos_sec * @as(f64, @floatFromInt(byte_rate));
-    if (offset_f >= @as(f64, @floatFromInt(pcm.len))) {
-        const end = pcm.len - pcm.len % bytes_per_frame;
-        return .{ .first = pcm[0..end], .second = pcm[end..] };
+    // An empty or inverted span cuts nothing.
+    if (start_sec >= end_sec or byte_rate == 0) return .{ .head = pcm, .tail = pcm[0..0] };
+
+    // Clamp in float space: @intFromFloat of an out-of-range float panics.
+    var start: usize = 0;
+    const start_f = @max(start_sec, 0.0) * byte_rate;
+    if (start_f < pcm_len) {
+        const raw: usize = @intFromFloat(start_f);
+        start = raw - raw % bytes_per_frame;
+    } else {
+        start = pcm.len - pcm.len % bytes_per_frame;
     }
-    const raw: usize = @intFromFloat(offset_f);
-    const offset = raw - raw % bytes_per_frame;
-    return .{ .first = pcm[0..offset], .second = pcm[offset..] };
+
+    var end: usize = pcm.len;
+    const end_f = @max(end_sec, 0.0) * byte_rate;
+    if (end_f < pcm_len) {
+        const raw: usize = @intFromFloat(end_f);
+        end = raw - raw % bytes_per_frame;
+    }
+    if (end < start) end = start;
+    return .{ .head = pcm[0..start], .tail = pcm[end..] };
 }
 
 /// The PCM payload and layout of a 16-bit PCM WAV image.
@@ -102,10 +122,10 @@ pub const Loaded = struct {
     }
 };
 
-/// Loads a recording as PCM for waveform display or splitting: M4A through
+/// Loads a recording as PCM for waveform display or cutting: M4A through
 /// the system decoder (resampled to 48 kHz stereo), WAV straight from its
 /// chunks. Anything else is not ours to read.
-pub fn loadPcm(gpa: std.mem.Allocator, path: []const u8) SplitError!Loaded {
+pub fn loadPcm(gpa: std.mem.Allocator, path: []const u8) CutError!Loaded {
     if (std.mem.endsWith(u8, path, ".wav")) {
         const image = readWholeFile(gpa, path) catch return error.CannotDecode;
         errdefer gpa.free(image);
@@ -132,48 +152,66 @@ pub fn loadPcm(gpa: std.mem.Allocator, path: []const u8) SplitError!Loaded {
     return error.CannotDecode;
 }
 
-/// Splits the recording at `path` at `pos_sec`: decodes it, writes
-/// `<stem>-part1.m4a` and `<stem>-part2.m4a` beside it, and removes the
-/// original. Reports what it did on stderr.
-pub fn splitFile(io: std.Io, gpa: std.mem.Allocator, path: []const u8, pos_sec: f64) SplitError!void {
+/// Removes the marked span from the recording at `path`: decodes it, cuts
+/// `[start_sec, end_sec)` out at frame boundaries, re-encodes the remainder
+/// into one M4A and replaces the original — the temp file is renamed over it
+/// atomically, so a failed encode never destroys the source. A legacy .wav
+/// is replaced by the M4A cut beside it. Reports what it did on stderr.
+pub fn cutIntervalFile(io: std.Io, gpa: std.mem.Allocator, path: []const u8, start_sec: f64, end_sec: f64) CutError!void {
     var audio = try loadPcm(gpa, path);
     defer audio.deinit(gpa);
 
-    const parts = splitPcm(audio.pcm, audio.channels, audio.sample_rate, pos_sec);
-    const byte_rate = audio.byteRate();
+    const rem = cutPcm(audio.pcm, audio.channels, audio.sample_rate, start_sec, end_sec);
+    const kept_len = rem.head.len + rem.tail.len;
+    // Nothing removed, or the whole body gone: refuse both.
+    if (kept_len == audio.pcm.len or kept_len == 0) return error.NothingToCut;
 
-    // Parts land beside the original; a same-named file is replaced, like
-    // every other write in this project.
+    const kept = gpa.alloc(u8, kept_len) catch return error.OutOfMemory;
+    defer gpa.free(kept);
+    @memcpy(kept[0..rem.head.len], rem.head);
+    @memcpy(kept[rem.head.len..], rem.tail);
+
     const dir = std.fs.path.dirname(path) orelse ".";
     const base = std.fs.path.basename(path);
     const stem = stripExt(base);
 
-    var p1_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    var p2_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const p1 = joinPart(&p1_buf, dir, stem, "-part1.m4a") orelse return error.CannotWrite;
-    const p2 = joinPart(&p2_buf, dir, stem, "-part2.m4a") orelse return error.CannotWrite;
+    // The cut replaces the original: .m4a in place, a legacy .wav as the
+    // M4A cut beside it. The temp name is never scanned by the library.
+    var target_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const target = if (std.mem.endsWith(u8, base, ".wav"))
+        joinPath(&target_buf, dir, stem, ".m4a") orelse return error.CannotWrite
+    else
+        path;
+    var tmp_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const tmp = joinPath(&tmp_buf, dir, std.fs.path.basename(target), ".cut.tmp") orelse return error.CannotWrite;
 
-    m4a.encode(p1, parts.first, audio.sample_rate, audio.channels) catch return error.CannotWrite;
-    m4a.encode(p2, parts.second, audio.sample_rate, audio.channels) catch {
-        std.Io.Dir.cwd().deleteFile(io, p1) catch {};
+    m4a.encode(tmp, kept, audio.sample_rate, audio.channels) catch {
+        std.Io.Dir.cwd().deleteFile(io, tmp) catch {};
         return error.CannotWrite;
     };
-    std.Io.Dir.cwd().deleteFile(io, path) catch {};
+    // Atomic replace: the original is swapped only once the cut is encoded.
+    std.Io.Dir.rename(std.Io.Dir.cwd(), tmp, std.Io.Dir.cwd(), target, io) catch {
+        std.Io.Dir.cwd().deleteFile(io, tmp) catch {};
+        return error.CannotWrite;
+    };
+    if (!std.mem.eql(u8, target, path)) std.Io.Dir.cwd().deleteFile(io, path) catch {};
 
-    printStderr(io, "Split ");
+    printStderr(io, "Cut ");
     printStderr(io, base);
-    printStderr(io, " at ");
+    printStderr(io, " ");
     var line: [32]u8 = undefined;
-    printStderr(io, mmss(&line, pos_sec));
+    printStderr(io, mmss(&line, start_sec));
+    printStderr(io, "–");
+    printStderr(io, mmss(&line, end_sec));
     printStderr(io, " → ");
-    printStderr(io, std.fs.path.basename(p1));
-    printStderr(io, " (");
-    printStderr(io, secs(&line, @as(f64, @floatFromInt(parts.first.len)) / @as(f64, @floatFromInt(byte_rate))));
-    printStderr(io, " s), ");
-    printStderr(io, std.fs.path.basename(p2));
-    printStderr(io, " (");
-    printStderr(io, secs(&line, @as(f64, @floatFromInt(parts.second.len)) / @as(f64, @floatFromInt(byte_rate))));
-    printStderr(io, " s)\n");
+    if (!std.mem.eql(u8, target, path)) {
+        printStderr(io, std.fs.path.basename(target));
+        printStderr(io, " (");
+    }
+    printStderr(io, secs(&line, @as(f64, @floatFromInt(kept_len)) / @as(f64, @floatFromInt(audio.byteRate()))));
+    printStderr(io, " s");
+    if (!std.mem.eql(u8, target, path)) printStderr(io, ")");
+    printStderr(io, "\n");
 }
 
 /// A recording's stem: the name without its .m4a/.wav extension.
@@ -209,8 +247,8 @@ fn readWholeFile(gpa: std.mem.Allocator, path: []const u8) ReadError![]u8 {
     return out.toOwnedSlice(gpa);
 }
 
-fn joinPart(buf: []u8, dir: []const u8, stem: []const u8, suffix: []const u8) ?[]const u8 {
-    return std.fmt.bufPrint(buf, "{s}/{s}{s}", .{ dir, stem, suffix }) catch null;
+fn joinPath(buf: []u8, dir: []const u8, name: []const u8, suffix: []const u8) ?[]const u8 {
+    return std.fmt.bufPrint(buf, "{s}/{s}{s}", .{ dir, name, suffix }) catch null;
 }
 
 /// "MM:SS"
@@ -240,7 +278,7 @@ fn writeAll(fd: c_int, bytes: []const u8) void {
 }
 
 fn testPath(buf: []u8, suffix: []const u8) [*:0]u8 {
-    return std.fmt.bufPrintZ(buf, "/tmp/rec-split-test-{d}{s}", .{ getpid(), suffix }) catch unreachable;
+    return std.fmt.bufPrintZ(buf, "/tmp/rec-cut-test-{d}{s}", .{ getpid(), suffix }) catch unreachable;
 }
 
 /// Canonical 44-byte PCM WAV header + `data_bytes` of a square wave.
@@ -272,24 +310,35 @@ fn testWav(buf: *std.ArrayList(u8), gpa: std.mem.Allocator, data_bytes: usize) !
     }
 }
 
-test "splitPcm cuts at a frame boundary and clamps to the body" {
+test "cutPcm removes the span at frame boundaries and clamps" {
     // 100 stereo frames at 50 Hz = 2 s; 200 bytes per second.
     var pcm: [400]u8 = undefined;
     @memset(&pcm, 0);
 
-    const half = splitPcm(&pcm, 2, 50, 1.0);
-    try std.testing.expectEqual(@as(usize, 200), half.first.len);
-    try std.testing.expectEqual(@as(usize, 200), half.second.len);
+    // Middle cut: [0.5, 1.5] removes 1 s, keeping 0.5 s before and after.
+    const mid = cutPcm(&pcm, 2, 50, 0.5, 1.5);
+    try std.testing.expectEqual(@as(usize, 100), mid.head.len);
+    try std.testing.expectEqual(@as(usize, 100), mid.tail.len);
 
-    // A position inside a frame truncates down to the whole frame.
-    const odd = splitPcm(&pcm, 2, 50, 1.001);
-    try std.testing.expectEqual(@as(usize, 200), odd.first.len);
+    // Head cut: [0, 1.5] removes the beginning, keeping the tail.
+    const head = cutPcm(&pcm, 2, 50, 0.0, 1.5);
+    try std.testing.expectEqual(@as(usize, 0), head.head.len);
+    try std.testing.expectEqual(@as(usize, 100), head.tail.len);
 
-    // Out-of-range positions clamp so no part goes negative.
-    const start = splitPcm(&pcm, 2, 50, -1.0);
-    try std.testing.expectEqual(@as(usize, 0), start.first.len);
-    const end = splitPcm(&pcm, 2, 50, 99.0);
-    try std.testing.expectEqual(@as(usize, 0), end.second.len);
+    // Tail cut: [0.5, 99] removes everything past 0.5 s (clamped to the end).
+    const tail = cutPcm(&pcm, 2, 50, 0.5, 99.0);
+    try std.testing.expectEqual(@as(usize, 100), tail.head.len);
+    try std.testing.expectEqual(@as(usize, 0), tail.tail.len);
+
+    // Inverted span cuts nothing: the whole body is the head.
+    const none = cutPcm(&pcm, 2, 50, 1.5, 0.5);
+    try std.testing.expectEqual(@as(usize, 400), none.head.len);
+    try std.testing.expectEqual(@as(usize, 0), none.tail.len);
+
+    // Positions inside a frame truncate down to whole frames.
+    const odd = cutPcm(&pcm, 2, 50, 1.001, 1.499);
+    try std.testing.expectEqual(@as(usize, 200), odd.head.len);
+    try std.testing.expectEqual(@as(usize, 104), odd.tail.len);
 }
 
 test "parseWav finds the data chunk and layout" {
@@ -304,21 +353,21 @@ test "parseWav finds the data chunk and layout" {
     try std.testing.expect(parseWav("definitely not a wav file at all....") == null);
 }
 
-test "splitFile writes two playable parts and drops the original" {
+test "cutIntervalFile replaces the recording with the cut" {
     var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
     const io = threaded.io();
     const gpa = std.testing.allocator;
 
-    // A 0.4 s WAV, split in half.
+    // A 0.4 s WAV; the cut removes [0.1, 0.3] → 0.2 s remains.
     var path_buf: [96]u8 = undefined;
     const path = testPath(&path_buf, ".wav");
     defer _ = unlink(path);
-    var part1_buf: [104]u8 = undefined;
-    var part2_buf: [104]u8 = undefined;
-    const part1_path = testPath(&part1_buf, "-part1.m4a");
-    const part2_path = testPath(&part2_buf, "-part2.m4a");
-    defer _ = unlink(part1_path);
-    defer _ = unlink(part2_path);
+    var m4a_buf: [96]u8 = undefined;
+    const m4a_path = testPath(&m4a_buf, ".m4a");
+    defer _ = unlink(m4a_path);
+    var tmp_buf: [112]u8 = undefined;
+    const tmp_path = testPath(&tmp_buf, ".m4a.cut.tmp");
+    defer _ = unlink(tmp_path);
 
     var wav: std.ArrayList(u8) = .empty;
     defer wav.deinit(gpa);
@@ -329,21 +378,81 @@ test "splitFile writes two playable parts and drops the original" {
         writeAll(fd, wav.items);
     }
 
-    try splitFile(io, gpa, std.mem.sliceTo(path, 0), 0.2);
+    try cutIntervalFile(io, gpa, std.mem.sliceTo(path, 0), 0.1, 0.3);
 
-    const d1 = m4a.durationSec(std.mem.sliceTo(part1_path, 0)).?;
-    const d2 = m4a.durationSec(std.mem.sliceTo(part2_path, 0)).?;
-    try std.testing.expect(@abs(d1 - 0.2) < 0.05);
-    try std.testing.expect(@abs(d2 - 0.2) < 0.05);
-
-    // The original is gone: the split is a cut, not a copy.
+    // The .wav is gone; the cut lives beside it as .m4a, 0.2 s long.
     try std.testing.expectError(
         error.FileNotFound,
         std.Io.Dir.cwd().statFile(io, std.mem.sliceTo(path, 0), .{}),
     );
+    const d = m4a.durationSec(std.mem.sliceTo(m4a_path, 0)).?;
+    try std.testing.expect(@abs(d - 0.2) < 0.05);
+    // No encode temp file is left behind.
+    try std.testing.expectError(
+        error.FileNotFound,
+        std.Io.Dir.cwd().statFile(io, std.mem.sliceTo(tmp_path, 0), .{}),
+    );
 }
 
-test "splitFile rejects audio it cannot decode" {
+test "cutIntervalFile cuts an m4a in place" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    const io = threaded.io();
+    const gpa = std.testing.allocator;
+
+    // Encode 0.4 s of silence, then cut [0.1, 0.3] out of it.
+    var path_buf: [96]u8 = undefined;
+    const path = testPath(&path_buf, ".m4a");
+    defer _ = unlink(path);
+    var tmp_buf: [112]u8 = undefined;
+    const tmp_path = testPath(&tmp_buf, ".m4a.cut.tmp");
+    defer _ = unlink(tmp_path);
+
+    const pcm = try gpa.alloc(u8, 48000 * 2 * 2 * 4 / 10); // 0.4 s of silence
+    defer gpa.free(pcm);
+    @memset(pcm, 0);
+    try m4a.encode(std.mem.sliceTo(path, 0), pcm, 48000, 2);
+
+    try cutIntervalFile(io, gpa, std.mem.sliceTo(path, 0), 0.1, 0.3);
+
+    // The original path now holds the 0.2 s cut.
+    const d = m4a.durationSec(std.mem.sliceTo(path, 0)).?;
+    try std.testing.expect(@abs(d - 0.2) < 0.05);
+    try std.testing.expectError(
+        error.FileNotFound,
+        std.Io.Dir.cwd().statFile(io, std.mem.sliceTo(tmp_path, 0), .{}),
+    );
+}
+
+test "cutIntervalFile refuses spans that cut nothing" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    const io = threaded.io();
+    const gpa = std.testing.allocator;
+
+    // An inverted span on a valid recording: nothing to cut, file untouched.
+    var path_buf: [96]u8 = undefined;
+    const path = testPath(&path_buf, ".wav");
+    defer _ = unlink(path);
+
+    var wav: std.ArrayList(u8) = .empty;
+    defer wav.deinit(gpa);
+    try testWav(&wav, gpa, 48000 * 2 * 2 * 4 / 10); // 0.4 s
+    {
+        const fd = open(path, 0x601, @as(c_uint, 0o644)); // O_WRONLY|O_CREAT|O_TRUNC
+        defer _ = close(fd);
+        writeAll(fd, wav.items);
+    }
+
+    try std.testing.expectError(
+        error.NothingToCut,
+        cutIntervalFile(io, gpa, std.mem.sliceTo(path, 0), 0.3, 0.1),
+    );
+    // The file is intact: the same 0.4 s of PCM.
+    const image = try readWholeFile(gpa, std.mem.sliceTo(path, 0));
+    defer gpa.free(image);
+    try std.testing.expectEqual(@as(usize, 48000 * 2 * 2 * 4 / 10), parseWav(image).?.pcm.len);
+}
+
+test "cutIntervalFile rejects audio it cannot decode" {
     var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
     const io = threaded.io();
 
@@ -358,6 +467,6 @@ test "splitFile rejects audio it cannot decode" {
 
     try std.testing.expectError(
         error.CannotDecode,
-        splitFile(io, std.testing.allocator, std.mem.sliceTo(path, 0), 0.5),
+        cutIntervalFile(io, std.testing.allocator, std.mem.sliceTo(path, 0), 0.1, 0.2),
     );
 }

@@ -1,7 +1,7 @@
 const std = @import("std");
 const library = @import("library.zig");
 const prompts = @import("prompts.zig");
-const split = @import("split.zig");
+const cut = @import("cut.zig");
 const waveform = @import("waveform.zig");
 
 const afplay_path = "/usr/bin/afplay";
@@ -21,9 +21,11 @@ fn onSigint(sig: std.posix.SIG) callconv(.c) void {
 /// `play <index|filename>`: resolves the selection against the library and
 /// plays it through the system player. On a terminal, the playback is a
 /// two-line live view — status plus waveform with the played part bright —
-/// driven by keys: SPACE pauses/resumes (SIGSTOP/SIGCONT on afplay), S cuts
-/// the recording in two at the current position, Q or Ctrl-C stops. Without
-/// a terminal it plays to completion under Ctrl-C, as before.
+/// driven by keys: SPACE pauses/resumes (SIGSTOP/SIGCONT on afplay), I and O
+/// mark the piece to cut at the current position (shown reversed on the
+/// bar), D cuts it out and replaces the recording, R clears the marks, Q or
+/// Ctrl-C stops. Without a terminal it plays to completion under Ctrl-C, as
+/// before.
 pub fn playSelection(io: std.Io, gpa: std.mem.Allocator, selection: []const u8, recordings_path: []const u8) u8 {
     var entries: std.ArrayList(library.Entry) = .empty;
     defer library.freeEntries(gpa, &entries);
@@ -74,7 +76,7 @@ pub fn playSelection(io: std.Io, gpa: std.mem.Allocator, selection: []const u8, 
     var peaks: std.ArrayList(waveform.Peak) = .empty;
     defer peaks.deinit(gpa);
     var duration_sec: f64 = 0;
-    if (split.loadPcm(gpa, abs_path)) |*audio| {
+    if (cut.loadPcm(gpa, abs_path)) |*audio| {
         var a = audio.*;
         defer a.deinit(gpa);
         duration_sec = @as(f64, @floatFromInt(a.pcm.len)) / @as(f64, @floatFromInt(a.byteRate()));
@@ -149,9 +151,10 @@ const peakBlockBytes = waveform.peakBlockBytes;
 const PlayState = enum { playing, paused };
 
 /// Runs the two-line live view over afplay: the waveform (played part
-/// bright, rest dim) and a status line, redrawn each tick. Keys: SPACE
-/// pause/resume, S split here, Q/Ctrl-C stop. Restores the terminal on
-/// every exit path.
+/// bright, rest dim, marked span reversed) and a status line, redrawn each
+/// tick. Keys: SPACE pause/resume, I/O mark the cut span, D cuts it out,
+/// R clears the marks, Q/Ctrl-C stop. Restores the terminal on every exit
+/// path.
 fn playInteractive(
     io: std.Io,
     gpa: std.mem.Allocator,
@@ -208,6 +211,11 @@ fn playInteractive(
     var first_draw = true;
     var exit_code: u8 = 0;
     var reaped = false;
+    // The piece to cut, anchored at the positions where I and O were
+    // pressed; null until marked. Either mark alone resolves against the
+    // recording's edges (O cuts the head, I the tail).
+    var mark_in: ?f64 = null;
+    var mark_out: ?f64 = null;
 
     keys: while (true) {
         // Natural end: reap without blocking and leave the view.
@@ -230,7 +238,7 @@ fn playInteractive(
         const elapsed_ns = ref.nanoseconds - started.nanoseconds - paused_ns;
         const elapsed_sec = @as(f64, @floatFromInt(@max(elapsed_ns, 0))) / 1e9;
 
-        draw(io, state, elapsed_sec, duration_sec, peaks, &first_draw);
+        draw(io, state, elapsed_sec, duration_sec, peaks, mark_in, mark_out, &first_draw);
 
         switch (readKey(io, tick_ms)) {
             .none => {},
@@ -248,16 +256,33 @@ fn playInteractive(
                         state = .playing;
                     }
                 },
-                's', 'S' => {
-                    // A cut needs audio on both sides; near the edges there
-                    // is nothing to split, so say so and keep playing.
-                    if (elapsed_sec < 0.2 or duration_sec - elapsed_sec < 0.2) {
-                        drawNote(io, "nothing to split this close to the edge", &first_draw);
+                'i', 'I' => {
+                    // Marks anchor at the current position; pressing the
+                    // same key again moves the mark.
+                    mark_in = elapsed_sec;
+                },
+                'o', 'O' => {
+                    mark_out = elapsed_sec;
+                },
+                'r', 'R' => {
+                    mark_in = null;
+                    mark_out = null;
+                },
+                'd', 'D' => {
+                    const span = cutSpan(mark_in, mark_out, duration_sec) orelse {
+                        drawNote(io, "mark the piece with I and O first", &first_draw);
+                        continue :keys;
+                    };
+                    // A cut needs at least 0.2 s on both sides: the marked
+                    // piece must be real, and it must not eat the file.
+                    const removed = span[1] - span[0];
+                    if (removed < 0.2 or duration_sec - removed < 0.2) {
+                        drawNote(io, "nothing to cut: marks too close or covering everything", &first_draw);
                         continue :keys;
                     }
                     stopChild(pid, &reaped);
-                    split.splitFile(io, gpa, abs_path, elapsed_sec) catch |err| {
-                        printStderr(io, "play: cannot split (");
+                    cut.cutIntervalFile(io, gpa, abs_path, span[0], span[1]) catch |err| {
+                        printStderr(io, "play: cannot cut (");
                         printStderr(io, @errorName(err));
                         printStderr(io, ")\n");
                     };
@@ -322,15 +347,21 @@ fn draw(
     elapsed_sec: f64,
     duration_sec: f64,
     peaks: []const waveform.Peak,
+    mark_in: ?f64,
+    mark_out: ?f64,
     first_draw: *bool,
 ) void {
     const width = termWidth();
     var line: [512]u8 = undefined;
 
     if (!first_draw.*) printStderr(io, "\x1b[1A\r");
-    printStderr(io, statusLine(&line, state, elapsed_sec, duration_sec));
+    printStderr(io, statusLine(&line, state, elapsed_sec, duration_sec, mark_in, mark_out));
     printStderr(io, "\x1b[K\n");
-    printStderr(io, waveform.renderBar(peaks, width, playedCols(width, elapsed_sec, duration_sec), &line));
+    const sel: ?waveform.SelRange = if (cutSpan(mark_in, mark_out, duration_sec)) |s|
+        .{ .start_col = playedCols(width, s[0], duration_sec), .end_col = playedCols(width, s[1], duration_sec) }
+    else
+        null;
+    printStderr(io, waveform.renderBar(peaks, width, playedCols(width, elapsed_sec, duration_sec), sel, &line));
     printStderr(io, "\x1b[K");
     first_draw.* = false;
 }
@@ -352,14 +383,40 @@ fn playedCols(width: usize, elapsed_sec: f64, duration_sec: f64) usize {
     return @intFromFloat(cols);
 }
 
-/// "▶ 00:12 / 01:30  SPACE=pause S=split Q=stop" — the whole status line.
-fn statusLine(buf: []u8, state: PlayState, elapsed_sec: f64, duration_sec: f64) []const u8 {
+/// The interval the marks describe, normalized: the earlier mark is the
+/// start. Only O cuts the head [0..O], only I the tail [I..end], both the
+/// middle [min..max]. Null when no marks are set.
+fn cutSpan(mark_in: ?f64, mark_out: ?f64, duration_sec: f64) ?[2]f64 {
+    if (mark_in == null and mark_out == null) return null;
+    const start = mark_in orelse 0;
+    const end = mark_out orelse duration_sec;
+    return .{ @min(start, end), @max(start, end) };
+}
+
+/// "▶ 00:12 / 01:30  SPACE=pause I=mark O=mark D=delete Q=stop" — the whole
+/// status line. With marks set, the resolved span is shown and R=reset
+/// replaces the I/O hints, which are already in place.
+fn statusLine(buf: []u8, state: PlayState, elapsed_sec: f64, duration_sec: f64, mark_in: ?f64, mark_out: ?f64) []const u8 {
     var n: usize = 0;
     appendStr(buf, &n, if (state == .playing) "▶ " else "⏸ ");
     appendTime(buf, &n, elapsed_sec);
     appendStr(buf, &n, " / ");
     appendTime(buf, &n, duration_sec);
-    appendStr(buf, &n, if (state == .playing) "  SPACE=pause S=split Q=stop" else "  SPACE=play S=split Q=stop");
+    const span = cutSpan(mark_in, mark_out, duration_sec);
+    if (span) |s| {
+        appendStr(buf, &n, "  [");
+        appendTime(buf, &n, s[0]);
+        appendStr(buf, &n, "–");
+        appendTime(buf, &n, s[1]);
+        appendStr(buf, &n, "]");
+    }
+    appendStr(buf, &n, "  SPACE=");
+    appendStr(buf, &n, if (state == .playing) "pause" else "play");
+    if (span != null) {
+        appendStr(buf, &n, " D=delete R=reset Q=stop");
+    } else {
+        appendStr(buf, &n, " I=mark O=mark D=delete Q=stop");
+    }
     return buf[0..n];
 }
 
@@ -442,16 +499,42 @@ test "playedCols maps elapsed time onto the bar width" {
     try std.testing.expectEqual(@as(usize, 0), playedCols(80, 50, 0));
 }
 
-test "statusLine shows state, times, and keys" {
+test "statusLine shows state, times, marks, and keys" {
     var buf: [128]u8 = undefined;
     try std.testing.expectEqualStrings(
-        "▶ 00:12 / 01:30  SPACE=pause S=split Q=stop",
-        statusLine(&buf, .playing, 12.3, 90),
+        "▶ 00:12 / 01:30  SPACE=pause I=mark O=mark D=delete Q=stop",
+        statusLine(&buf, .playing, 12.3, 90, null, null),
     );
     try std.testing.expectEqualStrings(
-        "⏸ 00:12 / 01:30  SPACE=play S=split Q=stop",
-        statusLine(&buf, .paused, 12.3, 90),
+        "⏸ 00:12 / 01:30  SPACE=play I=mark O=mark D=delete Q=stop",
+        statusLine(&buf, .paused, 12.3, 90, null, null),
     );
+    // With marks, the resolved span is shown and R=reset replaces I/O.
+    try std.testing.expectEqualStrings(
+        "▶ 00:12 / 01:30  [00:05–00:12]  SPACE=pause D=delete R=reset Q=stop",
+        statusLine(&buf, .playing, 12.3, 90, 12.3, 5.1),
+    );
+    // Only one mark resolves against the recording's edges.
+    try std.testing.expectEqualStrings(
+        "▶ 00:12 / 01:30  [00:05–01:30]  SPACE=pause D=delete R=reset Q=stop",
+        statusLine(&buf, .playing, 12.3, 90, 5.1, null),
+    );
+}
+
+test "cutSpan normalizes the marks into the interval to cut" {
+    // Inverted marks swap to a positive span.
+    const s1 = cutSpan(12.3, 5.1, 90).?;
+    try std.testing.expectEqual(@as(f64, 5.1), s1[0]);
+    try std.testing.expectEqual(@as(f64, 12.3), s1[1]);
+    // Only O cuts from the start; only I cuts to the end.
+    const s2 = cutSpan(null, 3.0, 90).?;
+    try std.testing.expectEqual(@as(f64, 0), s2[0]);
+    try std.testing.expectEqual(@as(f64, 3.0), s2[1]);
+    const s3 = cutSpan(4.0, null, 90).?;
+    try std.testing.expectEqual(@as(f64, 4.0), s3[0]);
+    try std.testing.expectEqual(@as(f64, 90), s3[1]);
+    // No marks: no span.
+    try std.testing.expect(cutSpan(null, null, 90) == null);
 }
 
 test "appendTime formats MM:SS and H:MM:SS" {

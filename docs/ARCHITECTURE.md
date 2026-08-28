@@ -16,8 +16,8 @@ microphone ──miniaudio──▶ PCM frames in memory ──m4a.zig (AAC)─�
                         ├── waveform.zig (peaks, live bar) ◀── record   │
                         │                                               │
                         ├── playback.zig ──/usr/bin/afplay──▶ speaker   │
-                        │        │ SPACE pause · S split · Q stop       │
-                        │        └── split.zig (cut → re-encode)        │
+                        │        │ SPACE pause · I/O mark · D cut · Q    │
+                        │        └── cut.zig (remove interval → re-enc)  │
                         │                                               │
                         └── <stem>.md transcript ── printed in full ────┤
                                                                         │
@@ -36,9 +36,9 @@ verbs in a raw-mode interactive menu.
 | `src/record.zig` | The record verb: capture loop, naming, encode-on-stop |
 | `src/m4a.zig` | M4A/AAC encode via AudioToolbox's system encoder; container duration parse for `list`; `decode` back to canonical s16/48k/stereo PCM via `ExtAudioFileRead` |
 | `src/library.zig` | Scans `~/recordings/`, sorts newest-first, formats table |
-| `src/playback.zig` | Interactive play: raw-mode TUI over `/usr/bin/afplay` — live waveform, SPACE pause (SIGSTOP/SIGCONT), S split, Q stop; prints the `<stem>.md` transcript in full; blocking fallback off a tty |
-| `src/waveform.zig` | Peak accumulation over PCM (100 ms blocks) and one-line Unicode block-bar rendering with played-column dimming; terminal width |
-| `src/split.zig` | Cuts an audio file at a time position: decode (or read WAV) → frame-aligned slice → re-encode both halves → drop the original |
+| `src/playback.zig` | Interactive play: raw-mode TUI over `/usr/bin/afplay` — live waveform, SPACE pause (SIGSTOP/SIGCONT), I/O marks, D cut, R reset marks, Q stop; prints the `<stem>.md` transcript in full; blocking fallback off a tty |
+| `src/waveform.zig` | Peak accumulation over PCM (100 ms blocks) and one-line Unicode block-bar rendering with played-column dimming and reverse-video selection; terminal width |
+| `src/cut.zig` | Removes a marked time interval in place: decode (or read WAV) → frame-aligned slice → re-encode the remainder → replace the original |
 | `src/transcribe.zig` | Spawns `/usr/bin/curl` against Deepgram pre-recorded API |
 | `src/okf.zig` | Renders the OKF markdown transcript (frontmatter + prose) |
 | `src/tui.zig` | Raw-mode interactive menu; restores terminal on every exit path |

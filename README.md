@@ -131,8 +131,14 @@ printed in full first. Keys:
 | Key | Action |
 |-----|--------|
 | `SPACE` | Pause / resume |
-| `S` | Split the recording at the current position into `NAME-part1.m4a` / `NAME-part2.m4a` (the original is removed) |
+| `I` / `O` | Mark the start / end of the piece to cut |
+| `D` | Remove the marked piece, replacing the original recording |
+| `R` | Clear the marks |
 | `Q` / `Ctrl-C` | Stop playback |
+
+The marked piece is shown in reverse video on the waveform bar. Cutting
+removes the piece between the marks (head, tail, or middle) and replaces the
+original file; the transcript (`NAME.md`) is left untouched.
 
 Off a terminal (piped output), playback is plain `afplay`; `Ctrl-C` stops it.
 

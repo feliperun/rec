@@ -194,7 +194,7 @@ fn composeLiveLine(buf: []u8, secs: u32, peaks: []const waveform.Peak, width: us
     n += 2;
     appendStr(buf, &n, " ");
     const bar_width = @min(width -| n, 300);
-    n += @intCast(waveform.renderBar(peaks, bar_width, bar_width, buf[n..]).len);
+    n += @intCast(waveform.renderBar(peaks, bar_width, bar_width, null, buf[n..]).len);
     return buf[0..n];
 }
 

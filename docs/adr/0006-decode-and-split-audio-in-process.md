@@ -2,8 +2,9 @@
 type: ADR
 id: "0006"
 title: "Decode and split audio in-process"
-status: active
+status: superseded
 date: 2026-08-28
+superseded_by: "0007"
 ---
 
 ## Context

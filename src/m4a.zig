@@ -190,7 +190,7 @@ pub const decode_sample_rate: u32 = 48000;
 pub const decode_channels: u32 = 2;
 
 /// Decodes the M4A at `path` into canonical PCM via ExtAudioFileRead, for
-/// the waveform view and splitting. Read errors surface as `M4aError`;
+/// the waveform view and cutting. Read errors surface as `M4aError`;
 /// allocation failures as `OutOfMemory`.
 pub fn decode(gpa: std.mem.Allocator, path: []const u8) (M4aError || std.mem.Allocator.Error)!Decoded {
     const url = fileUrl(path) orelse return error.CreateFailed;

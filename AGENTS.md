@@ -107,8 +107,8 @@ file — keep appending.
   Anything that aliases inside `x` (a `pcm` slice pointing into a freed
   WAV image) goes dangling silently and crashes later in libc, e.g.
   `CrashIfClientProvidedBogusAudioBufferList`. Hoist frees to function scope
-  and keep the image alive for the whole scope that uses it. See [ADR 0006](docs/adr/0006-decode-and-split-audio-in-process.md)
-  and `src/split.zig`.
+  and keep the image alive for the whole scope that uses it. See [ADR 0007](docs/adr/0007-cut-marked-intervals-in-place.md)
+  and `src/cut.zig`.
 
 ---
 

@@ -498,7 +498,7 @@ test {
     _ = @import("transcribe.zig");
     _ = @import("okf.zig");
     _ = @import("waveform.zig");
-    _ = @import("split.zig");
+    _ = @import("cut.zig");
 }
 
 /// A recording's stem: the name without its .m4a/.wav extension, used for

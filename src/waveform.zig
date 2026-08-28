@@ -99,25 +99,39 @@ fn slicePeak(pcm: []const u8) Peak {
     return peak;
 }
 
+/// A contiguous run of bar columns marked for cutting, inclusive of both ends.
+pub const SelRange = struct {
+    start_col: usize,
+    end_col: usize,
+};
+
 /// Renders `peaks` as one line of at most `width` block glyphs: when there
 /// are more peaks than columns, each column shows the max peak of its slice;
 /// when fewer, the line is padded with silence. Columns at `played_cols` and
 /// beyond are dimmed (ANSI), the rest at normal intensity — pass `width`
-/// (or more) to keep the whole bar bright, e.g. while recording. Returns the
+/// (or more) to keep the whole bar bright, e.g. while recording. A marked
+/// `sel` range shows in reverse video, which wins over dimming. Returns the
 /// written slice of `out`.
-pub fn renderBar(peaks: []const Peak, width: usize, played_cols: usize, out: []u8) []const u8 {
+pub fn renderBar(peaks: []const Peak, width: usize, played_cols: usize, sel: ?SelRange, out: []u8) []const u8 {
     var n: usize = 0;
     var dim = false; // current intensity, flipped only on transitions
+    var rev = false; // current reverse-video state, flipped only on transitions
     var col: usize = 0;
     while (col < width) : (col += 1) {
+        const in_sel = if (sel) |s| s.start_col <= col and col <= s.end_col else false;
         const want_dim = col >= played_cols;
-        if (want_dim != dim) {
+        if (in_sel != rev) {
+            n = appendStr(out, n, if (in_sel) "\x1b[0m\x1b[7m" else "\x1b[0m");
+            rev = in_sel;
+            dim = false;
+        }
+        if (!in_sel and want_dim != dim) {
             n = appendStr(out, n, if (want_dim) "\x1b[2m" else "\x1b[0m");
             dim = want_dim;
         }
         n = appendStr(out, n, blocks[columnLevel(peaks, col, width)]);
     }
-    if (dim) n = appendStr(out, n, "\x1b[0m");
+    if (rev or dim) n = appendStr(out, n, "\x1b[0m");
     return out[0..n];
 }
 
@@ -217,7 +231,7 @@ test "renderBar maps peaks to block levels and pads with silence" {
     var buf: [128]u8 = undefined;
     // 0, 8192, 16384, 24576, 32767 → levels 0, 2, 4, 6, 7; rest is silence.
     const peaks = [_]Peak{ 0, 8192, 16384, 24576, 32767 };
-    const line = renderBar(&peaks, 10, 10, &buf);
+    const line = renderBar(&peaks, 10, 10, null, &buf);
     try std.testing.expectEqualStrings("▁▃▅▇█▁▁▁▁▁", line);
 }
 
@@ -226,22 +240,38 @@ test "renderBar compresses more peaks than columns by max per column" {
     // 20 peaks in (0, 16384) pairs, width 10 → every column is the pair max.
     var peaks: [20]Peak = undefined;
     for (&peaks, 0..) |*p, i| p.* = if (i % 2 == 1) 16384 else 0;
-    const line = renderBar(&peaks, 10, 10, &buf);
+    const line = renderBar(&peaks, 10, 10, null, &buf);
     try std.testing.expectEqualStrings("▅▅▅▅▅▅▅▅▅▅", line);
 }
 
 test "renderBar dims columns at and past the playback position" {
     var buf: [128]u8 = undefined;
     const peaks = [_]Peak{ 8192, 8192, 8192, 8192 };
-    try std.testing.expectEqualStrings("▃▃\x1b[2m▃▃\x1b[0m", renderBar(&peaks, 4, 2, &buf));
+    try std.testing.expectEqualStrings("▃▃\x1b[2m▃▃\x1b[0m", renderBar(&peaks, 4, 2, null, &buf));
 
     // Nothing played: the whole bar is dim; everything played: no escapes.
-    try std.testing.expectEqualStrings("\x1b[2m▃▃▃▃\x1b[0m", renderBar(&peaks, 4, 0, &buf));
-    try std.testing.expectEqualStrings("▃▃▃▃", renderBar(&peaks, 4, 4, &buf));
+    try std.testing.expectEqualStrings("\x1b[2m▃▃▃▃\x1b[0m", renderBar(&peaks, 4, 0, null, &buf));
+    try std.testing.expectEqualStrings("▃▃▃▃", renderBar(&peaks, 4, 4, null, &buf));
+}
+
+test "renderBar shows the marked span in reverse video" {
+    var buf: [128]u8 = undefined;
+    const peaks = [_]Peak{ 8192, 8192, 8192, 8192 };
+
+    // A middle mark reverses its column; dimming resumes past it.
+    try std.testing.expectEqualStrings(
+        "▃\x1b[0m\x1b[7m▃\x1b[0m\x1b[2m▃▃\x1b[0m",
+        renderBar(&peaks, 4, 1, .{ .start_col = 1, .end_col = 1 }, &buf),
+    );
+    // A full span overrides the dim whole-bar state entirely.
+    try std.testing.expectEqualStrings(
+        "\x1b[0m\x1b[7m▃▃▃▃\x1b[0m",
+        renderBar(&peaks, 4, 0, .{ .start_col = 0, .end_col = 3 }, &buf),
+    );
 }
 
 test "renderBar with no peaks is a line of silence" {
     var buf: [64]u8 = undefined;
-    try std.testing.expectEqualStrings("▁▁▁", renderBar(&.{}, 3, 3, &buf));
-    try std.testing.expectEqualStrings("", renderBar(&.{}, 0, 0, &buf));
+    try std.testing.expectEqualStrings("▁▁▁", renderBar(&.{}, 3, 3, null, &buf));
+    try std.testing.expectEqualStrings("", renderBar(&.{}, 0, 0, null, &buf));
 }
