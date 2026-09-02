@@ -1,5 +1,18 @@
 # Changelog
 
+## [1.5.0](https://github.com/feliperun/rec/compare/v1.4.0...v1.5.0) (2026-09-02)
+
+
+### Features
+
+* cut marked intervals in place instead of splitting ([c46178c](https://github.com/feliperun/rec/commit/c46178ced074e912539e267de566d46ac7f989c4))
+* live waveform and interactive playback with split ([df51afe](https://github.com/feliperun/rec/commit/df51afe09e12524a44cf0294567ff5c6bb84ff66))
+
+
+### Bug Fixes
+
+* prevent corrupt partial M4A recordings ([84aefa4](https://github.com/feliperun/rec/commit/84aefa4700be9dedc6cae0b00d77101922681313))
+
 ## [1.4.0](https://github.com/feliperun/rec/compare/v1.3.0...v1.4.0) (2026-08-26)
 
 
