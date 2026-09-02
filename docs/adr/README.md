@@ -53,3 +53,4 @@ proposed → active → superseded
 | [0004](0004-record-natively-in-m4a-aac.md) | Record natively in M4A/AAC instead of WAV | active |
 | [0006](0006-decode-and-split-audio-in-process.md) | Decode and split audio in-process | superseded |
 | [0007](0007-cut-marked-intervals-in-place.md) | Cut marked intervals in place | active |
+| [0008](0008-finalize-recordings-incrementally-and-atomically.md) | Finalize recordings incrementally and atomically | active |

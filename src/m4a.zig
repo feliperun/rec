@@ -9,6 +9,7 @@ pub const M4aError = error{
     CreateFailed,
     SetPropertyFailed,
     WriteFailed,
+    FinalizeFailed,
     ReadFailed,
     InvalidPcm,
 };
@@ -108,73 +109,121 @@ extern "c" fn AudioFileGetProperty(
 ) OSStatus;
 extern "c" fn AudioFileClose(in_file: AudioFileID) OSStatus;
 
+/// An AAC encoder that accepts PCM while capture is still running. The file
+/// is only complete after `finish`; `abort` is safe for every other exit path.
+pub const Encoder = struct {
+    url: *const anyopaque,
+    out: ExtAudioFileRef,
+    bytes_per_frame: u32,
+    closed: bool = false,
+
+    pub fn init(path: []const u8, sample_rate: u32, channels: u32) M4aError!Encoder {
+        if (channels == 0) return error.InvalidPcm;
+        const bytes_per_frame: u32 = channels * 2;
+        const url = fileUrl(path) orelse return error.CreateFailed;
+        errdefer CFRelease(url);
+
+        // The file's data format: plain AAC; packet sizes are the encoder's
+        // to fill in.
+        const file_desc = AudioStreamBasicDescription{
+            .sample_rate = @floatFromInt(sample_rate),
+            .format_id = fcc("aac "),
+            .format_flags = 0,
+            .bytes_per_packet = 0,
+            .frames_per_packet = 0,
+            .bytes_per_frame = 0,
+            .channels_per_frame = channels,
+            .bits_per_channel = 0,
+            .reserved = 0,
+        };
+        var out: ExtAudioFileRef = null;
+        // Erase flag: a same-named file is replaced, like createFile truncates.
+        if (ExtAudioFileCreateWithURL(url, fcc("m4af"), &file_desc, null, 1, &out) != 0) {
+            return error.CreateFailed;
+        }
+        errdefer _ = ExtAudioFileDispose(out);
+
+        // Pin Apple's software encoder so output does not depend on which
+        // codec implementations the host happens to expose.
+        var manufacturer: u32 = fcc("appl");
+        if (ExtAudioFileSetProperty(out, fcc("cman"), @sizeOf(u32), &manufacturer) != 0) {
+            return error.SetPropertyFailed;
+        }
+
+        // Client format: exactly what capture.zig accumulates — interleaved
+        // packed signed 16-bit little-endian (native) samples.
+        const client_desc = AudioStreamBasicDescription{
+            .sample_rate = @floatFromInt(sample_rate),
+            .format_id = fcc("lpcm"),
+            .format_flags = (1 << 2) | (1 << 3), // IsSignedInteger | IsPacked
+            .bytes_per_packet = bytes_per_frame,
+            .frames_per_packet = 1,
+            .bytes_per_frame = bytes_per_frame,
+            .channels_per_frame = channels,
+            .bits_per_channel = 16,
+            .reserved = 0,
+        };
+        if (ExtAudioFileSetProperty(out, fcc("cfmt"), @sizeOf(AudioStreamBasicDescription), &client_desc) != 0) {
+            return error.SetPropertyFailed;
+        }
+
+        return .{
+            .url = url,
+            .out = out,
+            .bytes_per_frame = bytes_per_frame,
+        };
+    }
+
+    pub fn write(self: *Encoder, pcm: []const u8) M4aError!void {
+        if (self.closed) return error.WriteFailed;
+        if (pcm.len % self.bytes_per_frame != 0) return error.InvalidPcm;
+
+        var offset: usize = 0;
+        const max_frames = std.math.maxInt(u32);
+        while (offset < pcm.len) {
+            const available_frames = (pcm.len - offset) / self.bytes_per_frame;
+            const frames: u32 = @intCast(@min(available_frames, @as(usize, max_frames)));
+            const bytes = @as(usize, frames) * self.bytes_per_frame;
+            const buffers = AudioBufferList{
+                .number_buffers = 1,
+                .buffers = .{.{
+                    .number_channels = self.bytes_per_frame / 2,
+                    .data_byte_size = @intCast(bytes),
+                    .data = @constCast(pcm[offset..][0..bytes].ptr),
+                }},
+            };
+            if (ExtAudioFileWrite(self.out, frames, &buffers) != 0) return error.WriteFailed;
+            offset += bytes;
+        }
+    }
+
+    /// Disposes the AudioToolbox file and flushes its `moov` atom.
+    pub fn finish(self: *Encoder) M4aError!void {
+        if (self.closed) return;
+        self.closed = true;
+        const status = ExtAudioFileDispose(self.out);
+        CFRelease(self.url);
+        if (status != 0) return error.FinalizeFailed;
+    }
+
+    /// Closes an unfinished encoder without exposing its partial file.
+    pub fn abort(self: *Encoder) void {
+        if (self.closed) return;
+        self.closed = true;
+        _ = ExtAudioFileDispose(self.out);
+        CFRelease(self.url);
+    }
+};
+
 /// Encodes interleaved s16 little-endian PCM (the capture format) into an
 /// AAC-LC stream inside an M4A container at `path`, overwriting any file
 /// already there. The CoreAudio converter owns the encoding: the client
 /// format below is the PCM we hand it, the file format is AAC.
 pub fn encode(path: []const u8, pcm: []const u8, sample_rate: u32, channels: u32) M4aError!void {
-    const bytes_per_frame: u32 = channels * 2;
-    if (pcm.len % bytes_per_frame != 0) return error.InvalidPcm;
-
-    const url = fileUrl(path) orelse return error.CreateFailed;
-    defer CFRelease(url);
-
-    // The file's data format: plain AAC; packet sizes are the encoder's to
-    // fill in.
-    const file_desc = AudioStreamBasicDescription{
-        .sample_rate = @floatFromInt(sample_rate),
-        .format_id = fcc("aac "),
-        .format_flags = 0,
-        .bytes_per_packet = 0,
-        .frames_per_packet = 0,
-        .bytes_per_frame = 0,
-        .channels_per_frame = channels,
-        .bits_per_channel = 0,
-        .reserved = 0,
-    };
-    var out: ExtAudioFileRef = null;
-    // Erase flag: a same-named file is replaced, like createFile truncates.
-    if (ExtAudioFileCreateWithURL(url, fcc("m4af"), &file_desc, null, 1, &out) != 0) {
-        return error.CreateFailed;
-    }
-    // Dispose also flushes the moov atom; failing to call it would leave a
-    // headerless body behind.
-    defer _ = ExtAudioFileDispose(out);
-
-    // Pin Apple's software encoder so output does not depend on which
-    // codec implementations the host happens to expose.
-    var manufacturer: u32 = fcc("appl");
-    if (ExtAudioFileSetProperty(out, fcc("cman"), @sizeOf(u32), &manufacturer) != 0) {
-        return error.SetPropertyFailed;
-    }
-
-    // Client format: exactly what capture.zig accumulates — interleaved
-    // packed signed 16-bit little-endian (native) samples.
-    const client_desc = AudioStreamBasicDescription{
-        .sample_rate = @floatFromInt(sample_rate),
-        .format_id = fcc("lpcm"),
-        .format_flags = (1 << 2) | (1 << 3), // IsSignedInteger | IsPacked
-        .bytes_per_packet = bytes_per_frame,
-        .frames_per_packet = 1,
-        .bytes_per_frame = bytes_per_frame,
-        .channels_per_frame = channels,
-        .bits_per_channel = 16,
-        .reserved = 0,
-    };
-    if (ExtAudioFileSetProperty(out, fcc("cfmt"), @sizeOf(AudioStreamBasicDescription), &client_desc) != 0) {
-        return error.SetPropertyFailed;
-    }
-
-    const buffers = AudioBufferList{
-        .number_buffers = 1,
-        .buffers = .{.{
-            .number_channels = channels,
-            .data_byte_size = @intCast(pcm.len),
-            .data = @constCast(pcm.ptr),
-        }},
-    };
-    const frames: u32 = @intCast(pcm.len / bytes_per_frame);
-    if (ExtAudioFileWrite(out, frames, &buffers) != 0) return error.WriteFailed;
+    var encoder = try Encoder.init(path, sample_rate, channels);
+    defer encoder.abort();
+    try encoder.write(pcm);
+    try encoder.finish();
 }
 
 /// Decoded audio in the project's canonical PCM format: interleaved s16le
@@ -250,7 +299,8 @@ pub fn decode(gpa: std.mem.Allocator, path: []const u8) (M4aError || std.mem.All
 
 /// Duration of the M4A at `path` in seconds, via the system's MP4 parser;
 /// null when the file cannot be opened or probed.
-pub fn durationSec(path: []const u8) ?f64 {    const url = fileUrl(path) orelse return null;
+pub fn durationSec(path: []const u8) ?f64 {
+    const url = fileUrl(path) orelse return null;
     defer CFRelease(url);
 
     var file: AudioFileID = null;
@@ -302,6 +352,25 @@ test "encode writes an M4A whose duration parses back" {
 
     const duration = durationSec(std.mem.sliceTo(path, 0)) orelse return error.TestUnexpectedResult;
     // AAC priming/padding makes container durations accurate to ~±20 ms.
+    try std.testing.expect(@abs(duration - 0.5) < 0.05);
+}
+
+test "stream encoder finalizes a recording written in chunks" {
+    var path_buf: [64]u8 = undefined;
+    const path = testPath(&path_buf, ".stream.m4a");
+    defer _ = unlink(path);
+
+    var pcm = try testSquareWave(std.testing.allocator);
+    defer pcm.deinit(std.testing.allocator);
+
+    var encoder = try Encoder.init(std.mem.sliceTo(path, 0), 48000, 2);
+    defer encoder.abort();
+    const midpoint = pcm.items.len / 2;
+    try encoder.write(pcm.items[0..midpoint]);
+    try encoder.write(pcm.items[midpoint..]);
+    try encoder.finish();
+
+    const duration = durationSec(std.mem.sliceTo(path, 0)) orelse return error.TestUnexpectedResult;
     try std.testing.expect(@abs(duration - 0.5) < 0.05);
 }
 

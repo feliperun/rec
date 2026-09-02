@@ -11,6 +11,10 @@ pub fn requestStop() void {
     g_stop.store(true, .release);
 }
 
+pub fn resetStop() void {
+    g_stop.store(false, .release);
+}
+
 pub fn stopRequested() bool {
     return g_stop.load(.acquire);
 }
@@ -94,6 +98,8 @@ pub const Recorder = struct {
     /// how the main thread watches the recording grow while the audio
     /// callback owns the buffer.
     pub fn takeNewPcm(self: *Recorder, out: *std.ArrayList(u8), consumed: *usize) void {
+        // Never let a skipped tick replay the previous chunk to consumers.
+        out.clearRetainingCapacity();
         // Skip the tick if the callback holds the lock; `consumed` does not
         // advance, so the next tick copies everything appended since then.
         if (!self.pcm_lock.tryLock()) return;
@@ -165,4 +171,21 @@ test "takeNewPcm drains each append exactly once" {
     try rec.pcm.appendSlice(std.testing.allocator, &.{ 5, 6, 7, 8 });
     rec.takeNewPcm(&out, &consumed);
     try std.testing.expectEqualSlices(u8, &.{ 5, 6, 7, 8 }, out.items);
+}
+
+test "takeNewPcm does not replay a chunk when the callback owns the lock" {
+    var rec = Recorder.init(std.testing.allocator);
+    defer rec.deinit();
+    try rec.pcm.appendSlice(std.testing.allocator, &.{ 1, 2, 3, 4 });
+
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(std.testing.allocator);
+    try out.append(std.testing.allocator, 99);
+    var consumed: usize = 0;
+
+    rec.pcm_lock = .locked;
+    defer rec.pcm_lock = .unlocked;
+    rec.takeNewPcm(&out, &consumed);
+    try std.testing.expectEqual(@as(usize, 0), out.items.len);
+    try std.testing.expectEqual(@as(usize, 0), consumed);
 }

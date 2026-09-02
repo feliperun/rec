@@ -7,7 +7,7 @@
 ## High-level flow
 
 ```
-microphone ──miniaudio──▶ PCM frames in memory ──m4a.zig (AAC)──▶ ~/recordings/*.m4a
+microphone ──miniaudio──▶ PCM frames in memory ──m4a.zig (chunked AAC)──▶ .part ──rename──▶ ~/recordings/*.m4a
                                                                         │
                                    library.zig (scan, sort, table) ◀────┤
                                                                         │
@@ -33,7 +33,7 @@ verbs in a raw-mode interactive menu.
 |--------|----------------|
 | `src/main.zig` | Arg parsing, subcommand dispatch, exit codes |
 | `src/capture.zig` | miniaudio default-input device → growable PCM buffer |
-| `src/record.zig` | The record verb: capture loop, naming, encode-on-stop |
+| `src/record.zig` | The record verb: capture loop, naming, chunked encode and atomic publication |
 | `src/m4a.zig` | M4A/AAC encode via AudioToolbox's system encoder; container duration parse for `list`; `decode` back to canonical s16/48k/stereo PCM via `ExtAudioFileRead` |
 | `src/library.zig` | Scans `~/recordings/`, sorts newest-first, formats table |
 | `src/playback.zig` | Interactive play: raw-mode TUI over `/usr/bin/afplay` — live waveform, SPACE pause (SIGSTOP/SIGCONT), I/O marks, D cut, R reset marks, Q stop; prints the `<stem>.md` transcript in full; blocking fallback off a tty |

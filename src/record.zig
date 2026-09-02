@@ -15,7 +15,9 @@ pub fn recordOnce(
     key_stop: bool,
     recordings_path: []const u8,
 ) u8 {
-    // Before anything else, so an early Ctrl-C still finalizes a valid file.
+    // Reset the per-recording flag before installing the handler, so a prior
+    // Ctrl-C (for example from the interactive menu) cannot stop this run.
+    capture.resetStop();
     installSigintHandler();
 
     std.Io.Dir.cwd().createDirPath(io, recordings_path) catch {
@@ -37,6 +39,15 @@ pub fn recordOnce(
         return 1;
     };
 
+    var temp_path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const temp_path = std.fmt.bufPrint(&temp_path_buf, "{s}.part", .{path}) catch {
+        printStderr(io, "record: recording path is too long\n");
+        return 1;
+    };
+    // A killed process can only leave this private work file behind; never
+    // expose it to the recording library as an M4A.
+    std.Io.Dir.cwd().deleteFile(io, temp_path) catch {};
+
     var rec = capture.Recorder.init(gpa);
     defer rec.deinit();
     rec.start(.{}) catch {
@@ -47,6 +58,19 @@ pub fn recordOnce(
     printStderr(io, "Recording to ");
     printStderr(io, path);
     printStderr(io, if (key_stop) " (any key or Ctrl-C to stop)\n" else " (Ctrl-C to stop)\n");
+
+    var encoder = m4a.Encoder.init(temp_path, rec.sample_rate, rec.channels) catch {
+        std.Io.Dir.cwd().deleteFile(io, temp_path) catch {};
+        printStderr(io, "record: failed to initialize M4A encoder\n");
+        return 1;
+    };
+    var encoder_open = true;
+    defer {
+        if (encoder_open) {
+            encoder.abort();
+            std.Io.Dir.cwd().deleteFile(io, temp_path) catch {};
+        }
+    }
 
     const started_at = std.Io.Timestamp.now(io, .awake);
     const deadline: ?std.Io.Timestamp = if (duration_sec) |sec|
@@ -75,6 +99,10 @@ pub fn recordOnce(
         if (key_stop and stdinKeyPending()) break;
 
         rec.takeNewPcm(&new_pcm, &consumed);
+        encoder.write(new_pcm.items) catch {
+            printStderr(io, "record: failed to encode M4A audio\n");
+            return 1;
+        };
         tracker.feed(new_pcm.items);
         const secs: u32 = @intCast(@divTrunc(now.nanoseconds - started_at.nanoseconds, std.time.ns_per_s));
         printLiveLine(io, secs, tracker.view(&view) catch &.{});
@@ -82,16 +110,25 @@ pub fn recordOnce(
     }
 
     rec.stop();
-    printStderr(io, "\r\x1b[K"); // clear the live line for the summary below
-
-    // The encoder creates and finalizes the file itself; on failure whatever
-    // partial body it left is removed so the library never lists a corrupt
-    // recording.
-    m4a.encode(path, rec.pcm.items, rec.sample_rate, rec.channels) catch {
-        std.Io.Dir.cwd().deleteFile(io, path) catch {};
+    // The final callback block may have arrived after the last 100 ms tick.
+    rec.takeNewPcm(&new_pcm, &consumed);
+    encoder.write(new_pcm.items) catch {
         printStderr(io, "record: failed to encode M4A audio\n");
         return 1;
     };
+    printStderr(io, "\r\x1b[K"); // clear the live line for the summary below
+
+    // Dispose flushes the moov atom. The public name is exposed only after
+    // that succeeds, so an interrupted run leaves no corrupt .m4a behind.
+    encoder.finish() catch {
+        printStderr(io, "record: failed to finalize M4A audio\n");
+        return 1;
+    };
+    std.Io.Dir.rename(std.Io.Dir.cwd(), temp_path, std.Io.Dir.cwd(), path, io) catch {
+        printStderr(io, "record: failed to save M4A audio\n");
+        return 1;
+    };
+    encoder_open = false;
     const stat = std.Io.Dir.cwd().statFile(io, path, .{}) catch {
         printStderr(io, "record: failed to write M4A audio\n");
         return 1;
