@@ -82,7 +82,8 @@ pub fn playSelection(io: std.Io, gpa: std.mem.Allocator, selection: []const u8, 
     printTranscript(io, gpa, recordings_path, name);
 
     // One decode serves both the waveform and the audio: without it there
-    // is nothing to draw and nothing to play.
+    // is nothing to draw and nothing to play. The interactive view owns the
+    // load from here on — a confirmed cut rewrites the file and reloads it.
     var audio = cut.loadPcm(gpa, abs_buf[0..abs_len]) catch {
         printStderr(io, "play: cannot decode ");
         printStderr(io, name);
@@ -93,13 +94,6 @@ pub fn playSelection(io: std.Io, gpa: std.mem.Allocator, selection: []const u8, 
 
     const duration_sec = @as(f64, @floatFromInt(audio.pcm.len)) / @as(f64, @floatFromInt(audio.byteRate()));
 
-    var peaks: std.ArrayList(waveform.Peak) = .empty;
-    defer peaks.deinit(gpa);
-    var tracker = waveform.PeakTracker.init(gpa, waveform.peakBlockBytes(audio.byteRate()));
-    defer tracker.deinit();
-    tracker.feed(audio.pcm);
-    peaks.appendSlice(gpa, tracker.peaks.items) catch {};
-
     const is_tty = blk: {
         const stdin_tty = std.Io.File.stdin().isTty(io) catch false;
         const stderr_tty = std.Io.File.stderr().isTty(io) catch false;
@@ -107,7 +101,7 @@ pub fn playSelection(io: std.Io, gpa: std.mem.Allocator, selection: []const u8, 
     };
 
     if (is_tty) {
-        return playInteractive(io, gpa, abs_buf[0..abs_len], audio.pcm, audio.sample_rate, audio.channels, name, peaks.items, duration_sec, recordings_path);
+        return playInteractive(io, gpa, abs_buf[0..abs_len], &audio, name, duration_sec, recordings_path);
     }
 
     printStderr(io, "Playing ");
@@ -154,26 +148,26 @@ const PlayState = enum { playing, paused };
 /// Runs the live view while the player plays: the status line, the
 /// multi-row waveform (played part bright, rest dim, the marked region
 /// reversed between its two anchor cursors, playhead over everything), a
-/// notes row, and the key hints — one composed frame per tick. Restores
-/// the terminal on every exit path.
+/// notes row, and the key hints — one composed frame per tick. Owns
+/// `audio`: a confirmed cut rewrites the file, reloads it, and playback
+/// continues on the new PCM with the view still up. Restores the terminal
+/// on every exit path.
 fn playInteractive(
     io: std.Io,
     gpa: std.mem.Allocator,
     abs_path: []const u8,
-    pcm: []const u8,
-    sample_rate: u32,
-    channels: u32,
+    audio: *cut.Loaded,
     name: []const u8,
-    peaks: []const waveform.Peak,
-    duration_sec: f64,
+    duration_sec_in: f64,
     recordings_path: []const u8,
 ) u8 {
+    var duration_sec = duration_sec_in;
     const cooked = std.posix.tcgetattr(0) catch {
         // Raw mode is unavailable (odd terminal); degrade to plain playback.
         printStderr(io, "Playing ");
         printStderr(io, name);
         printStderr(io, " (Ctrl-C to stop)\n");
-        return playBlocking(io, pcm, sample_rate, channels);
+        return playBlocking(io, audio.pcm, audio.sample_rate, audio.channels);
     };
 
     var raw = cooked;
@@ -210,11 +204,20 @@ fn playInteractive(
 
     var p = player_mod.Player{};
     defer p.deinit();
-    p.start(pcm, sample_rate, @intCast(channels)) catch {
+    p.start(audio.pcm, audio.sample_rate, @intCast(audio.channels)) catch {
         leaveAlt(io, &alt_on, &esc_buf);
         printStderr(io, "play: cannot open the audio output device\n");
         return 1;
     };
+
+    // Peaks come from the same PCM the speaker plays, so a reload after a
+    // cut redraws the view from the new body.
+    var tracker = waveform.PeakTracker.init(gpa, waveform.peakBlockBytes(audio.byteRate()));
+    defer tracker.deinit();
+    tracker.feed(audio.pcm);
+    var peak_view: std.ArrayList(waveform.Peak) = .empty;
+    defer peak_view.deinit(gpa);
+    peak_view.appendSlice(gpa, tracker.peaks.items) catch {};
 
     // The whole view is composed here and written in one shot per tick —
     // many small writes are what made the cursor's movement flicker.
@@ -243,7 +246,7 @@ fn playInteractive(
             break :keys;
         }
 
-        draw(io, gpa, &frame, state, p.positionSec(), duration_sec, peaks, mark_in, mark_out, note, color);
+        draw(io, gpa, &frame, state, p.positionSec(), duration_sec, peak_view.items, mark_in, mark_out, note, color);
 
         const key = keys.readKey(tick_ms);
         if (key == .none) continue :keys; // no key: the notice stays up
@@ -256,14 +259,41 @@ fn playInteractive(
             confirming = null;
             const pressed: ?u8 = if (key == .byte) key.byte else null;
             if (pressed == '\r' or pressed == '\n') {
-                // The cut reports on the normal screen: leave first.
-                leaveAlt(io, &alt_on, &esc_buf);
+                // Cut in place and keep playing: the playhead maps through
+                // the cut, the new file replaces the old, and the view
+                // stays up — the note plus the shrunken waveform report it.
+                const pos = p.positionSec();
                 cut.cutIntervalFile(io, gpa, abs_path, span[0], span[1]) catch |err| {
-                    printStderr(io, "play: cannot cut (");
-                    printStderr(io, @errorName(err));
-                    printStderr(io, ")\n");
+                    note = std.fmt.bufPrint(&note_buf, "cut failed ({s}); still playing", .{@errorName(err)}) catch "cut failed; still playing";
+                    continue :keys; // the recording is untouched
                 };
-                break :keys;
+                p.stop();
+                p.deinit();
+                audio.deinit(gpa);
+                audio.* = cut.loadPcm(gpa, abs_path) catch {
+                    leaveAlt(io, &alt_on, &esc_buf);
+                    printStderr(io, "play: cannot reload after the cut\n");
+                    exit_code = 1;
+                    break :keys;
+                };
+                tracker.deinit();
+                tracker = waveform.PeakTracker.init(gpa, waveform.peakBlockBytes(audio.byteRate()));
+                tracker.feed(audio.pcm);
+                peak_view.clearRetainingCapacity();
+                peak_view.appendSlice(gpa, tracker.peaks.items) catch {};
+                duration_sec = @as(f64, @floatFromInt(audio.pcm.len)) / @as(f64, @floatFromInt(audio.byteRate()));
+                p.start(audio.pcm, audio.sample_rate, @intCast(audio.channels)) catch {
+                    leaveAlt(io, &alt_on, &esc_buf);
+                    printStderr(io, "play: cannot open the audio output device\n");
+                    exit_code = 1;
+                    break :keys;
+                };
+                p.seekSec(mapPosition(pos, span));
+                if (state == .paused) p.setPaused(true);
+                mark_in = null;
+                mark_out = null;
+                note = cutNote(&note_buf, span);
+                continue :keys;
             }
             if (pressed == 0x03) {
                 exit_code = 130;
@@ -429,6 +459,26 @@ fn confirmNote(buf: []u8, span: [2]f64) []const u8 {
     _ = appendTime(buf, &n, span[1]);
     appendStr(buf, &n, "? ENTER deletes, anything else cancels");
     return buf[0..n];
+}
+
+/// "cut 00:05–00:12" — the success note shown on the notes row after the
+/// file is rewritten; the waveform shrinking beside it is the visual proof.
+fn cutNote(buf: []u8, span: [2]f64) []const u8 {
+    var n: usize = 0;
+    appendStr(buf, &n, "cut ");
+    _ = appendTime(buf, &n, span[0]);
+    appendStr(buf, &n, "–");
+    _ = appendTime(buf, &n, span[1]);
+    return buf[0..n];
+}
+
+/// Where the playhead lands once the span is removed: before the span it
+/// stays put, inside it jumps to the span's start, past it shifts back by
+/// the removed length.
+fn mapPosition(pos: f64, span: [2]f64) f64 {
+    if (pos < span[0]) return pos;
+    if (pos < span[1]) return span[0];
+    return pos - (span[1] - span[0]);
 }
 
 /// How many columns of the grid the playback has covered.
@@ -670,6 +720,21 @@ test "confirmNote spells out the region and the keys" {
         "delete 00:05–00:12? ENTER deletes, anything else cancels",
         confirmNote(&buf, .{ 5.1, 12.3 }),
     );
+}
+
+test "cutNote names the removed span" {
+    var buf: [128]u8 = undefined;
+    try std.testing.expectEqualStrings("cut 00:05–00:12", cutNote(&buf, .{ 5.1, 12.3 }));
+}
+
+test "mapPosition carries the playhead through the cut" {
+    const span = [2]f64{ 5, 10 };
+    // Before the span: stays put.
+    try std.testing.expectApproxEqAbs(@as(f64, 2), mapPosition(2, span), 1e-9);
+    // Inside it: to the span's start.
+    try std.testing.expectApproxEqAbs(@as(f64, 5), mapPosition(7, span), 1e-9);
+    // Past it: shifts back by the removed length.
+    try std.testing.expectApproxEqAbs(@as(f64, 15), mapPosition(20, span), 1e-9);
 }
 
 test "statusLine colors state, times, and marks" {

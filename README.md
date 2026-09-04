@@ -154,7 +154,9 @@ recording has a transcript (`NAME.md`) it is printed in full first. Keys:
 | `Q` / `Ctrl-C` | Stop playback |
 
 Cutting removes the piece between the anchors (head, tail, or middle) after
-`ENTER` confirms the prompt and replaces the original file; the transcript
+`ENTER` confirms the prompt, replaces the original file, and keeps playing —
+the waveform redraws from the shortened recording and the playhead lands
+where it was; a note under the grid confirms the cut. The transcript
 (`NAME.md`) is left untouched.
 
 Off a terminal (piped output), playback runs to completion; `Ctrl-C` stops it.

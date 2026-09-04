@@ -30,9 +30,9 @@ EOF
 
 # Play on a pty, anchor the region's end at ~1.5 s (so the head [0..~1.5]
 # is removed), press DELETE at ~2.1 s and confirm with ENTER at ~2.6 s.
-# Interactive play ends on its own once the cut succeeds (the original is
-# replaced), so no quit key is needed.
-( sleep 1.5; printf 'o'; sleep 0.6; printf '\x7f'; sleep 0.5; printf '\r' ) | \
+# The view stays up and playback continues on the shorter recording; the
+# cut note is still on the notes row when Q quits at ~4.1 s.
+( sleep 1.5; printf 'o'; sleep 0.6; printf '\x7f'; sleep 0.5; printf '\r'; sleep 1.5; printf 'q' ) | \
   script -q /dev/null "$BIN" play e2e-cut.m4a > "$T/pty.log" 2>&1
 
 # The transcript was printed in full and the hints row drew.
@@ -41,8 +41,10 @@ grep -q "segunda linha do transcript" "$T/pty.log"
 grep -q "SPACE=pause ←→=1s SHIFT+←→=5s I=in O=out DEL=delete T=transcribe Q=stop" "$T/pty.log"
 # With the anchor set, the hints offer the reset.
 grep -q "DEL=delete R=reset T=transcribe Q=stop" "$T/pty.log"
-# DELETE asked before cutting.
+# DELETE asked before cutting, and the success note confirmed the cut
+# while the view was still up.
 grep -q "? ENTER deletes, anything else cancels" "$T/pty.log"
+grep -q "cut 00:00" "$T/pty.log"
 grep -q "Cut e2e-cut.m4a" "$T/pty.log"
 
 # The confirmed cut removed [0..~1.5] of 6 s: the original is replaced in

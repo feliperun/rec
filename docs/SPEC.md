@@ -36,8 +36,9 @@ them back — without leaving the terminal and without hand-rolled device code.
   seek ±1 s and `SHIFT`+`←`/`→` seek ±5 s; `I`/`O` anchor the region to cut
   (two full-height cursors with the span reversed between them), `DELETE`
   asks for confirmation and `ENTER` cuts it out in place (any other key
-  cancels), `R` resets the anchors, `T` transcribes the recording or opens
-  its transcript when one exists, `Q`/`Ctrl-C` stops.
+  cancels) — playback continues on the shortened recording with a note
+  confirming the cut —, `R` resets the anchors, `T` transcribes the
+  recording or opens its transcript when one exists, `Q`/`Ctrl-C` stops.
 - Off a terminal, playback runs to completion and is interruptible with
   `Ctrl-C`.
 
