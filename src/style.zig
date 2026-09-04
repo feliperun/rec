@@ -13,6 +13,7 @@ pub const red = "\x1b[31m";
 pub const green = "\x1b[32m";
 pub const yellow = "\x1b[33m";
 pub const cyan = "\x1b[36m";
+pub const white = "\x1b[97m";
 
 extern "c" fn getenv(name: [*:0]const u8) ?[*:0]const u8;
 

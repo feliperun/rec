@@ -231,14 +231,19 @@ def winsize(mfd, rows, cols):
     fcntl.ioctl(mfd, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
 
 
+GRID_CHARS = set("▀▄█ ")
+
+
 def check(screen, at):
-    live = [i for i, l in enumerate(screen.lines()) if "⏺" in l]
-    assert len(live) == 1, f"t={at}: expected exactly one live line, saw {len(live)}"
-    header = [i for i, l in enumerate(screen.lines()) if l.startswith("Recording to ")]
+    lines = screen.lines()
+    live = [i for i, l in enumerate(lines) if "⏺" in l or "⏸" in l]
+    assert len(live) == 1, f"t={at}: expected exactly one status line, saw {len(live)}"
+    header = [i for i, l in enumerate(lines) if l.startswith("Recording to ")]
     assert len(header) == 1, f"t={at}: expected exactly one header, saw {len(header)}"
-    assert header[0] < live[0], f"t={at}: live line above the header"
-    below = [l for i, l in enumerate(screen.lines()) if i > live[0] and l]
-    assert not below, f"t={at}: garbage below the live line: {below[:3]}"
+    assert header[0] < live[0], f"t={at}: status line above the header"
+    below = [l for i, l in enumerate(lines) if i > live[0] and l]
+    garbage = [l for l in below if not set(l) <= GRID_CHARS]
+    assert not garbage, f"t={at}: garbage below the status line: {garbage[:3]}"
 
 
 def run_due(screen, checks, steps, now):

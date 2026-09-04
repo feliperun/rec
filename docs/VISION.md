@@ -15,10 +15,10 @@ flags and produce enormous uncompressed files.
 
 ## The insight
 
-macOS already ships everything needed: CoreAudio for capture, a system player
-(`afplay`), and a pre-recorded transcription API. `rec` is only the thin,
-composable glue — a single Zig binary with no runtime dependencies, where every
-subcommand maps to one verb (record, list, play, transcribe).
+macOS already ships everything needed: CoreAudio for capture and playback, the
+system AAC encoder, and a pre-recorded transcription API. `rec` is only the
+thin, composable glue — a single Zig binary with no runtime dependencies, where
+every subcommand maps to one verb (record, list, play, transcribe).
 
 ## Principles
 

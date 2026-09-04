@@ -65,8 +65,8 @@ pub fn main(init: std.process.Init) u8 {
                 printStderr(io, usage);
                 return 1;
             },
-            .default => return record.recordOnce(io, init.gpa, null, false, recordings_path),
-            .duration => |sec| return record.recordOnce(io, init.gpa, sec, false, recordings_path),
+            .default => return record.recordOnce(io, init.gpa, null, recordings_path),
+            .duration => |sec| return record.recordOnce(io, init.gpa, sec, recordings_path),
         }
     }
 
@@ -493,6 +493,7 @@ test {
     _ = @import("live.zig");
     _ = @import("llm.zig");
     _ = @import("playback.zig");
+    _ = @import("player.zig");
     _ = @import("prompts.zig");
     _ = @import("setupcmd.zig");
     _ = @import("style.zig");
@@ -501,6 +502,7 @@ test {
     _ = @import("okf.zig");
     _ = @import("waveform.zig");
     _ = @import("cut.zig");
+    _ = @import("keys.zig");
 }
 
 /// A recording's stem: the name without its .m4a/.wav extension, used for

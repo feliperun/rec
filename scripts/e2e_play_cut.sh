@@ -37,7 +37,7 @@ EOF
 # ASCII key legend is part of the live status line).
 grep -q "MARKER_LINE_ALPHA" "$T/pty.log"
 grep -q "segunda linha do transcript" "$T/pty.log"
-grep -q "SPACE=pause I=mark O=mark D=delete Q=stop" "$T/pty.log"
+grep -q "SPACE=pause ←→=1s SHIFT+←→=5s I=mark O=mark D=delete Q=stop" "$T/pty.log"
 # With the mark set, the status line shows the span and R=reset appears.
 grep -q "R=reset Q=stop" "$T/pty.log"
 grep -q "Cut e2e-cut.m4a" "$T/pty.log"

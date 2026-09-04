@@ -118,7 +118,7 @@ pub fn runInteractive(io: std.Io, gpa: std.mem.Allocator, recordings_path: []con
                 'r' => {
                     digits_len = 0;
                     printStdout(io, "\n");
-                    _ = record.recordOnce(io, gpa, null, true, recordings_path);
+                    _ = record.recordOnce(io, gpa, null, recordings_path);
                     // recordOnce installed the plain recording handler.
                     installHandler();
                     printStdout(io, "\n> ");

@@ -1,33 +1,38 @@
 const std = @import("std");
+const cut = @import("cut.zig");
+const keys = @import("keys.zig");
 const library = @import("library.zig");
 const live = @import("live.zig");
+const player_mod = @import("player.zig");
 const prompts = @import("prompts.zig");
-const cut = @import("cut.zig");
 const style = @import("style.zig");
 const waveform = @import("waveform.zig");
 
-const afplay_path = "/usr/bin/afplay";
-
-/// Pid of the running afplay, published for the SIGINT handler (atomic
-/// load/store and kill() are async-signal-safe).
-var g_child_pid = std.atomic.Value(std.posix.pid_t).init(-1);
+/// Set by the SIGINT handler while the interactive loop owns the terminal.
 var g_interrupted = std.atomic.Value(bool).init(false);
 
 fn onSigint(sig: std.posix.SIG) callconv(.c) void {
     _ = sig;
     g_interrupted.store(true, .release);
-    const pid = g_child_pid.load(.acquire);
-    if (pid > 0) std.posix.kill(pid, .INT) catch {};
+}
+
+fn installSigint() void {
+    const act = std.posix.Sigaction{
+        .handler = .{ .handler = onSigint },
+        .mask = std.posix.sigemptyset(),
+        .flags = 0,
+    };
+    std.posix.sigaction(std.posix.SIG.INT, &act, null);
 }
 
 /// `play <index|filename>`: resolves the selection against the library and
-/// plays it through the system player. On a terminal, the playback is a
-/// two-line live view — status plus waveform with the played part bright —
-/// driven by keys: SPACE pauses/resumes (SIGSTOP/SIGCONT on afplay), I and O
-/// mark the piece to cut at the current position (shown reversed on the
-/// bar), D cuts it out and replaces the recording, R clears the marks, Q or
-/// Ctrl-C stops. Without a terminal it plays to completion under Ctrl-C, as
-/// before.
+/// plays it in-process on the default output device — the same decoded PCM
+/// the waveform is drawn from. On a terminal, playback is a live view on
+/// the alternate screen — the multi-row waveform with the playhead over it
+/// — driven by keys: SPACE pauses/resumes, ←/→ seek one second (SHIFT for
+/// five), I and O mark the piece to cut at the playhead (shown reversed),
+/// D cuts it out and replaces the recording, R clears the marks, Q or
+/// Ctrl-C stops. Without a terminal it plays to completion under Ctrl-C.
 pub fn playSelection(io: std.Io, gpa: std.mem.Allocator, selection: []const u8, recordings_path: []const u8) u8 {
     var entries: std.ArrayList(library.Entry) = .empty;
     defer library.freeEntries(gpa, &entries);
@@ -60,7 +65,7 @@ pub fn playSelection(io: std.Io, gpa: std.mem.Allocator, selection: []const u8, 
         return 1;
     };
 
-    // afplay gets an absolute path so it never depends on our cwd.
+    // An absolute path so the decode and any later cut never depend on cwd.
     var abs_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const abs_len = std.Io.Dir.cwd().realPathFile(io, recording_path, &abs_buf) catch {
         printStderr(io, "play: cannot resolve recordings/");
@@ -68,29 +73,28 @@ pub fn playSelection(io: std.Io, gpa: std.mem.Allocator, selection: []const u8, 
         printStderr(io, "\n");
         return 1;
     };
-    const abs_path = abs_buf[0..abs_len];
 
     // A transcribed recording shows its transcript in full above the player.
     printTranscript(io, gpa, recordings_path, name);
 
-    // The waveform is drawn from decoded PCM; failing to decode must not
-    // cost the user the playback, so it degrades to a flat bar.
+    // One decode serves both the waveform and the audio: without it there
+    // is nothing to draw and nothing to play.
+    var audio = cut.loadPcm(gpa, abs_buf[0..abs_len]) catch {
+        printStderr(io, "play: cannot decode ");
+        printStderr(io, name);
+        printStderr(io, "\n");
+        return 1;
+    };
+    defer audio.deinit(gpa);
+
+    const duration_sec = @as(f64, @floatFromInt(audio.pcm.len)) / @as(f64, @floatFromInt(audio.byteRate()));
+
     var peaks: std.ArrayList(waveform.Peak) = .empty;
     defer peaks.deinit(gpa);
-    var duration_sec: f64 = 0;
-    if (cut.loadPcm(gpa, abs_path)) |*audio| {
-        var a = audio.*;
-        defer a.deinit(gpa);
-        duration_sec = @as(f64, @floatFromInt(a.pcm.len)) / @as(f64, @floatFromInt(a.byteRate()));
-        var tracker = waveform.PeakTracker.init(gpa, peakBlockBytes(a.byteRate()));
-        defer tracker.deinit();
-        tracker.feed(a.pcm);
-        peaks.appendSlice(gpa, tracker.peaks.items) catch {};
-    } else |_| {
-        for (entries.items) |e| {
-            if (std.mem.eql(u8, e.name, name)) duration_sec = e.duration_sec orelse 0;
-        }
-    }
+    var tracker = waveform.PeakTracker.init(gpa, waveform.peakBlockBytes(audio.byteRate()));
+    defer tracker.deinit();
+    tracker.feed(audio.pcm);
+    peaks.appendSlice(gpa, tracker.peaks.items) catch {};
 
     const is_tty = blk: {
         const stdin_tty = std.Io.File.stdin().isTty(io) catch false;
@@ -99,47 +103,35 @@ pub fn playSelection(io: std.Io, gpa: std.mem.Allocator, selection: []const u8, 
     };
 
     if (is_tty) {
-        return playInteractive(io, gpa, abs_path, name, peaks.items, duration_sec);
+        return playInteractive(io, gpa, abs_buf[0..abs_len], audio.pcm, audio.sample_rate, audio.channels, name, peaks.items, duration_sec);
     }
 
     printStderr(io, "Playing ");
     printStderr(io, name);
     printStderr(io, " (Ctrl-C to stop)\n");
-    return playBlocking(io, abs_path);
+    return playBlocking(io, audio.pcm, audio.sample_rate, audio.channels);
 }
 
-/// Decodes, plays, and waits — the non-interactive path. The caller prints
-/// the messages. Returns afplay's exit code (130 on Ctrl-C).
-fn playBlocking(io: std.Io, abs_path: []const u8) u8 {
-    installSigint(io);
+/// Plays to completion — the non-interactive path. The caller prints the
+/// messages. Returns 0, or 130 on Ctrl-C.
+fn playBlocking(io: std.Io, pcm: []const u8, sample_rate: u32, channels: u32) u8 {
+    installSigint();
 
-    var child = std.process.spawn(io, .{
-        .argv = &.{ afplay_path, abs_path },
-    }) catch {
-        printStderr(io, "play: cannot spawn ");
-        printStderr(io, afplay_path);
-        printStderr(io, "\n");
+    var p = player_mod.Player{};
+    p.start(pcm, sample_rate, @intCast(channels)) catch {
+        printStderr(io, "play: cannot open the audio output device\n");
         return 1;
     };
-    if (child.id) |pid| g_child_pid.store(pid, .release);
-    defer g_child_pid.store(-1, .release);
+    defer p.deinit();
 
-    const term = child.wait(io) catch {
-        child.kill(io);
-        printStderr(io, "play: failed waiting for afplay\n");
-        return 1;
-    };
-
+    while (!p.isDone() and !g_interrupted.load(.acquire)) {
+        io.sleep(.fromMilliseconds(50), .awake) catch {};
+    }
     if (g_interrupted.load(.acquire)) {
         printStderr(io, "play: interrupted\n");
         return 130; // 128 + SIGINT
     }
-
-    return switch (term) {
-        .exited => |code| code,
-        .signal => |sig| @intCast(@min(@as(u32, 128) + @as(u32, @intCast(@intFromEnum(sig))), 255)),
-        .stopped, .unknown => 1,
-    };
+    return 0;
 }
 
 // --- interactive playback ----------------------------------------------------
@@ -148,19 +140,24 @@ fn playBlocking(io: std.Io, abs_path: []const u8) u8 {
 /// to keep the terminal quiet.
 const tick_ms = 100;
 
-const peakBlockBytes = waveform.peakBlockBytes;
+/// Seek steps: the arrows move the playhead by one second, SHIFT+arrows by
+/// five.
+const seek_step_sec: f64 = 1.0;
+const seek_step_shift_sec: f64 = 5.0;
 
 const PlayState = enum { playing, paused };
 
-/// Runs the two-line live view over afplay: the waveform (played part
-/// bright, rest dim, marked span reversed) and a status line, redrawn each
-/// tick. Keys: SPACE pause/resume, I/O mark the cut span, D cuts it out,
-/// R clears the marks, Q/Ctrl-C stop. Restores the terminal on every exit
-/// path.
+/// Runs the live view while the player plays: the status line, the
+/// multi-row waveform (played part bright, rest dim, marked span reversed,
+/// playhead over everything) and a notes row — all redrawn each tick.
+/// Restores the terminal on every exit path.
 fn playInteractive(
     io: std.Io,
     gpa: std.mem.Allocator,
     abs_path: []const u8,
+    pcm: []const u8,
+    sample_rate: u32,
+    channels: u32,
     name: []const u8,
     peaks: []const waveform.Peak,
     duration_sec: f64,
@@ -170,7 +167,7 @@ fn playInteractive(
         printStderr(io, "Playing ");
         printStderr(io, name);
         printStderr(io, " (Ctrl-C to stop)\n");
-        return playBlocking(io, abs_path);
+        return playBlocking(io, pcm, sample_rate, channels);
     };
 
     var raw = cooked;
@@ -187,7 +184,7 @@ fn playInteractive(
     };
     defer std.posix.tcsetattr(0, .FLUSH, cooked) catch {};
 
-    installSigint(io);
+    installSigint();
 
     const color = style.detect(io, .stderr());
 
@@ -205,31 +202,16 @@ fn playInteractive(
         }
     }.f;
 
-    const child = std.process.spawn(io, .{
-        .argv = &.{ afplay_path, abs_path },
-    }) catch {
+    var p = player_mod.Player{};
+    defer p.deinit();
+    p.start(pcm, sample_rate, @intCast(channels)) catch {
         leaveAlt(io, &alt_on, &esc_buf);
-        printStderr(io, "play: cannot spawn ");
-        printStderr(io, afplay_path);
-        printStderr(io, "\n");
+        printStderr(io, "play: cannot open the audio output device\n");
         return 1;
     };
-    const pid: std.posix.pid_t = child.id orelse {
-        leaveAlt(io, &alt_on, &esc_buf);
-        printStderr(io, "play: cannot spawn ");
-        printStderr(io, afplay_path);
-        printStderr(io, "\n");
-        return 1;
-    };
-    g_child_pid.store(pid, .release);
-    defer g_child_pid.store(-1, .release);
 
-    const started = std.Io.Timestamp.now(io, .awake);
     var state: PlayState = .playing;
-    var paused_ns: i128 = 0;
-    var pause_started = started;
     var exit_code: u8 = 0;
-    var reaped = false;
     // The piece to cut, anchored at the positions where I and O were
     // pressed; null until marked. Either mark alone resolves against the
     // recording's edges (O cuts the head, I the tail).
@@ -237,51 +219,29 @@ fn playInteractive(
     var mark_out: ?f64 = null;
 
     keys: while (true) {
-        // Natural end: reap without blocking and leave the view.
-        if (!reaped) {
-            var status: c_int = 0;
-            if (std.c.waitpid(pid, &status, std.posix.W.NOHANG) == pid) {
-                reaped = true;
-                break :keys;
-            }
-        }
+        if (p.isDone()) break :keys;
         if (g_interrupted.load(.acquire)) {
             exit_code = 130;
             break :keys;
         }
 
-        // Elapsed playing time: the wall clock minus whatever was spent
-        // paused (the reference freezes at pause_started while paused).
-        const now = std.Io.Timestamp.now(io, .awake);
-        const ref = if (state == .paused) pause_started else now;
-        const elapsed_ns = ref.nanoseconds - started.nanoseconds - paused_ns;
-        const elapsed_sec = @as(f64, @floatFromInt(@max(elapsed_ns, 0))) / 1e9;
+        draw(io, state, p.positionSec(), duration_sec, peaks, mark_in, mark_out, color);
 
-        draw(io, state, elapsed_sec, duration_sec, peaks, mark_in, mark_out, color);
-
-        switch (readKey(io, tick_ms)) {
+        switch (keys.readKey(tick_ms)) {
             .none => {},
             .eof => break :keys,
-            .key => |c| switch (c) {
+            .byte => |c| switch (c) {
                 ' ' => {
-                    if (state == .playing) {
-                        pause_started = std.Io.Timestamp.now(io, .awake);
-                        if (std.posix.kill(pid, .STOP)) |_| {} else |_| {}
-                        state = .paused;
-                    } else {
-                        const resumed = std.Io.Timestamp.now(io, .awake);
-                        paused_ns += resumed.nanoseconds - pause_started.nanoseconds;
-                        if (std.posix.kill(pid, .CONT)) |_| {} else |_| {}
-                        state = .playing;
-                    }
+                    state = if (state == .playing) .paused else .playing;
+                    p.setPaused(state == .paused);
                 },
                 'i', 'I' => {
                     // Marks anchor at the current position; pressing the
                     // same key again moves the mark.
-                    mark_in = elapsed_sec;
+                    mark_in = p.positionSec();
                 },
                 'o', 'O' => {
-                    mark_out = elapsed_sec;
+                    mark_out = p.positionSec();
                 },
                 'r', 'R' => {
                     mark_in = null;
@@ -299,7 +259,6 @@ fn playInteractive(
                         drawNote(io, "nothing to cut: marks too close or covering everything", color);
                         continue :keys;
                     }
-                    stopChild(pid, &reaped);
                     // The cut reports on the normal screen: leave first.
                     leaveAlt(io, &alt_on, &esc_buf);
                     cut.cutIntervalFile(io, gpa, abs_path, span[0], span[1]) catch |err| {
@@ -316,54 +275,24 @@ fn playInteractive(
                 },
                 else => {},
             },
+            .left => p.seekBy(-seek_step_sec),
+            .right => p.seekBy(seek_step_sec),
+            .shift_left => p.seekBy(-seek_step_shift_sec),
+            .shift_right => p.seekBy(seek_step_shift_sec),
         }
     }
 
-    if (!reaped) stopChild(pid, &reaped);
+    p.stop();
     leaveAlt(io, &alt_on, &esc_buf);
     printStderr(io, "\n");
     return exit_code;
 }
 
-/// Kills and reaps the child, ignoring an already-dead pid (ESRCH).
-fn stopChild(pid: std.posix.pid_t, reaped: *bool) void {
-    std.posix.kill(pid, .TERM) catch {};
-    var status: c_int = 0;
-    _ = std.c.waitpid(pid, &status, 0);
-    reaped.* = true;
-}
-
-const Key = union(enum) {
-    none,
-    key: u8,
-    eof,
-};
-
-/// Waits up to `ms` for a keystroke; the poll window is what paces the UI.
-fn readKey(io: std.Io, ms: i32) Key {
-    _ = io;
-    var fds = [_]std.posix.pollfd{.{
-        .fd = 0,
-        .events = std.posix.POLL.IN,
-        .revents = undefined,
-    }};
-    const ready = std.posix.poll(&fds, ms) catch return .none;
-    if (ready == 0) return .none;
-    var buf: [1]u8 = undefined;
-    const n = std.posix.read(0, &buf) catch return .none;
-    if (n == 0) return .eof;
-    return .{ .key = buf[0] };
-}
-
 // --- the live view -----------------------------------------------------------
 
-fn termWidth() usize {
-    return waveform.termWidth();
-}
-
-/// Draws the three-row view on the alternate screen: status on row 1, the
-/// waveform on row 2, and row 3 reserved for transient notes — all
-/// positioned absolutely, so whatever a resize did to the grid is
+/// Draws the view on the alternate screen: the status line, the waveform
+/// grid (`waveform.view_height` rows, the playhead over them), and a notes
+/// row — all positioned absolutely, so whatever a resize did to the grid is
 /// overwritten by this tick.
 fn draw(
     io: std.Io,
@@ -375,41 +304,52 @@ fn draw(
     mark_out: ?f64,
     color: bool,
 ) void {
-    const width = termWidth();
+    const width = @min(waveform.termWidth(), waveform.max_columns);
     var esc: [16]u8 = undefined;
-    var line: [1024]u8 = undefined;
-    var cols: usize = 0;
-    printStderr(io, live.moveTo(&esc, 1, 1));
-    printStderr(io, live.clearLine(&esc));
-    printStderr(io, statusLine(&line, state, elapsed_sec, duration_sec, mark_in, mark_out, color, &cols));
-    printStderr(io, live.moveTo(&esc, 2, 1));
-    printStderr(io, live.clearLine(&esc));
+    var line: [waveform.rowBufferLen(waveform.max_columns)]u8 = undefined;
+
+    var fractions: [waveform.max_columns]u8 = undefined;
+    const fr = waveform.columnFractions(peaks, fractions[0..width]);
+
+    const cursor = @min(playedCols(width, elapsed_sec, duration_sec), width -| 1);
     const sel: ?waveform.SelRange = if (cutSpan(mark_in, mark_out, duration_sec)) |s|
         .{ .start_col = playedCols(width, s[0], duration_sec), .end_col = playedCols(width, s[1], duration_sec) }
     else
         null;
-    printStderr(io, waveform.renderBar(peaks, width, playedCols(width, elapsed_sec, duration_sec), sel, color, &line));
-    printStderr(io, live.moveTo(&esc, 3, 1));
+
+    printStderr(io, live.moveTo(&esc, 1, 1));
+    printStderr(io, live.clearLine(&esc));
+    printStderr(io, statusLine(&line, state, elapsed_sec, duration_sec, mark_in, mark_out, color));
+
+    var row: usize = 0;
+    while (row < waveform.view_height) : (row += 1) {
+        printStderr(io, live.moveTo(&esc, 2 + row, 1));
+        printStderr(io, live.clearLine(&esc));
+        printStderr(io, waveform.renderRow(fr, waveform.view_height, row, .{
+            .played_cols = cursor,
+            .cursor_col = cursor,
+            .sel = sel,
+            .color = color,
+        }, &line));
+    }
+
+    // The notes row: erased here, written only by drawNote.
+    printStderr(io, live.moveTo(&esc, 2 + waveform.view_height, 1));
     printStderr(io, live.clearLine(&esc));
 }
 
-/// A transient one-line notice on row 3, under the waveform; the next draw
-/// erases it.
+/// A transient one-line notice under the waveform; the next draw erases it.
 fn drawNote(io: std.Io, msg: []const u8, color: bool) void {
     var esc: [16]u8 = undefined;
-    printStderr(io, live.moveTo(&esc, 3, 1));
-    printStderr(io, live.clearLine(&esc)); // wipe any previous note first
-    printStyledStderr(io, color, style.yellow, msg);
-}
-
-fn printStyledStderr(io: std.Io, color: bool, code: []const u8, text: []const u8) void {
     var buf: [512]u8 = undefined;
     var n: usize = 0;
-    style.appendStyled(&buf, &n, color, code, text);
+    printStderr(io, live.moveTo(&esc, 2 + waveform.view_height, 1));
+    printStderr(io, live.clearLine(&esc)); // wipe any previous note first
+    style.appendStyled(&buf, &n, color, style.yellow, msg);
     printStderr(io, buf[0..n]);
 }
 
-/// How many columns of the bar the playback has covered.
+/// How many columns of the grid the playback has covered.
 fn playedCols(width: usize, elapsed_sec: f64, duration_sec: f64) usize {
     if (duration_sec <= 0) return 0;
     const frac = @min(@max(elapsed_sec / duration_sec, 0.0), 1.0);
@@ -428,52 +368,47 @@ fn cutSpan(mark_in: ?f64, mark_out: ?f64, duration_sec: f64) ?[2]f64 {
     return .{ @min(start, end), @max(start, end) };
 }
 
-/// "▶ 00:12 / 01:30  SPACE=pause I=mark O=mark D=delete Q=stop" — the whole
-/// status line: a green ▶ (yellow ⏸ when paused), bold elapsed, dim total
-/// and key hints, cyan marked span. With marks set, the resolved span is
-/// shown and R=reset replaces the I/O hints. `cols_out` receives the display
-/// columns (escapes carry no width; the ▶/⏸ glyph is one cell).
-fn statusLine(buf: []u8, state: PlayState, elapsed_sec: f64, duration_sec: f64, mark_in: ?f64, mark_out: ?f64, color: bool, cols_out: *usize) []const u8 {
+/// "▶ 00:12 / 01:30  SPACE=pause ←→=1s SHIFT+←→=5s I=mark O=mark D=delete
+/// Q=stop" — the whole status line: a green ▶ (yellow ⏸ when paused), bold
+/// elapsed, dim total and key hints, cyan marked span. With marks set, the
+/// resolved span is shown and R=reset replaces the I/O hints.
+fn statusLine(buf: []u8, state: PlayState, elapsed_sec: f64, duration_sec: f64, mark_in: ?f64, mark_out: ?f64, color: bool) []const u8 {
     var n: usize = 0;
-    var cells: usize = 0;
     style.appendStyled(buf, &n, color, if (state == .playing) style.green else style.yellow, if (state == .playing) "▶" else "⏸");
-    cells += 1;
-    put(buf, &n, &cells, " ");
+    put(buf, &n, " ");
     style.begin(buf, &n, color, style.bold);
-    cells += appendTime(buf, &n, elapsed_sec);
+    _ = appendTime(buf, &n, elapsed_sec);
     style.end(buf, &n, color);
     style.begin(buf, &n, color, style.dim);
-    put(buf, &n, &cells, " / ");
-    cells += appendTime(buf, &n, duration_sec);
-    style.end(buf, &n, color);
+    put(buf, &n, " / ");
+    _ = appendTime(buf, &n, duration_sec);
     const span = cutSpan(mark_in, mark_out, duration_sec);
     if (span) |s| {
-        style.begin(buf, &n, color, style.cyan);
-        put(buf, &n, &cells, "  [");
-        cells += appendTime(buf, &n, s[0]);
-        appendStr(buf, &n, "–"); // en dash: three bytes, one cell
-        cells += 1;
-        cells += appendTime(buf, &n, s[1]);
-        put(buf, &n, &cells, "]");
         style.end(buf, &n, color);
+        style.begin(buf, &n, color, style.cyan);
+        put(buf, &n, "  [");
+        _ = appendTime(buf, &n, s[0]);
+        appendStr(buf, &n, "–"); // en dash: three bytes, one cell
+        _ = appendTime(buf, &n, s[1]);
+        put(buf, &n, "]");
+        style.end(buf, &n, color);
+        style.begin(buf, &n, color, style.dim);
     }
-    style.begin(buf, &n, color, style.dim);
-    put(buf, &n, &cells, "  SPACE=");
-    put(buf, &n, &cells, if (state == .playing) "pause" else "play");
+    put(buf, &n, "  SPACE=");
+    put(buf, &n, if (state == .playing) "pause" else "play");
+    put(buf, &n, " ←→=1s SHIFT+←→=5s ");
     if (span != null) {
-        put(buf, &n, &cells, " D=delete R=reset Q=stop");
+        put(buf, &n, "D=delete R=reset Q=stop");
     } else {
-        put(buf, &n, &cells, " I=mark O=mark D=delete Q=stop");
+        put(buf, &n, "I=mark O=mark D=delete Q=stop");
     }
     style.end(buf, &n, color);
-    cols_out.* = cells;
     return buf[0..n];
 }
 
-/// Appends a plain (one cell per byte) piece to the line.
-fn put(buf: []u8, n: *usize, cells: *usize, s: []const u8) void {
+/// Appends a plain piece to the line.
+fn put(buf: []u8, n: *usize, s: []const u8) void {
     appendStr(buf, n, s);
-    cells.* += s.len;
 }
 
 /// "MM:SS", or "H:MM:SS" past an hour; negative values clamp to zero.
@@ -523,16 +458,6 @@ fn printTranscript(io: std.Io, gpa: std.mem.Allocator, recordings_path: []const 
     printStderr(io, "\n");
 }
 
-fn installSigint(io: std.Io) void {
-    _ = io;
-    const act = std.posix.Sigaction{
-        .handler = .{ .handler = onSigint },
-        .mask = std.posix.sigemptyset(),
-        .flags = 0,
-    };
-    std.posix.sigaction(std.posix.SIG.INT, &act, null);
-}
-
 fn appendStr(buf: []u8, n: *usize, s: []const u8) void {
     for (s) |ch| {
         buf[n.*] = ch;
@@ -548,54 +473,49 @@ const record = @import("record.zig");
 
 // --- pure-view tests ---------------------------------------------------------
 
-test "playedCols maps elapsed time onto the bar width" {
+test "playedCols maps elapsed time onto the grid width" {
     try std.testing.expectEqual(@as(usize, 0), playedCols(80, 0, 100));
     try std.testing.expectEqual(@as(usize, 40), playedCols(80, 50, 100));
     try std.testing.expectEqual(@as(usize, 80), playedCols(80, 100, 100));
-    // Past the end clamps to full; no duration is a flat dark bar.
+    // Past the end clamps to full; no duration is a flat dark grid.
     try std.testing.expectEqual(@as(usize, 80), playedCols(80, 300, 100));
     try std.testing.expectEqual(@as(usize, 0), playedCols(80, 50, 0));
 }
 
 test "statusLine shows state, times, marks, and keys" {
-    var buf: [256]u8 = undefined;
-    var cols: usize = 0;
+    var buf: [512]u8 = undefined;
     try std.testing.expectEqualStrings(
-        "▶ 00:12 / 01:30  SPACE=pause I=mark O=mark D=delete Q=stop",
-        statusLine(&buf, .playing, 12.3, 90, null, null, false, &cols),
+        "▶ 00:12 / 01:30  SPACE=pause ←→=1s SHIFT+←→=5s I=mark O=mark D=delete Q=stop",
+        statusLine(&buf, .playing, 12.3, 90, null, null, false),
     );
-    try std.testing.expectEqual(@as(usize, 58), cols);
     try std.testing.expectEqualStrings(
-        "⏸ 00:12 / 01:30  SPACE=play I=mark O=mark D=delete Q=stop",
-        statusLine(&buf, .paused, 12.3, 90, null, null, false, &cols),
+        "⏸ 00:12 / 01:30  SPACE=play ←→=1s SHIFT+←→=5s I=mark O=mark D=delete Q=stop",
+        statusLine(&buf, .paused, 12.3, 90, null, null, false),
     );
     // With marks, the resolved span is shown and R=reset replaces I/O.
     try std.testing.expectEqualStrings(
-        "▶ 00:12 / 01:30  [00:05–00:12]  SPACE=pause D=delete R=reset Q=stop",
-        statusLine(&buf, .playing, 12.3, 90, 12.3, 5.1, false, &cols),
+        "▶ 00:12 / 01:30  [00:05–00:12]  SPACE=pause ←→=1s SHIFT+←→=5s D=delete R=reset Q=stop",
+        statusLine(&buf, .playing, 12.3, 90, 12.3, 5.1, false),
     );
     // Only one mark resolves against the recording's edges.
     try std.testing.expectEqualStrings(
-        "▶ 00:12 / 01:30  [00:05–01:30]  SPACE=pause D=delete R=reset Q=stop",
-        statusLine(&buf, .playing, 12.3, 90, 5.1, null, false, &cols),
+        "▶ 00:12 / 01:30  [00:05–01:30]  SPACE=pause ←→=1s SHIFT+←→=5s D=delete R=reset Q=stop",
+        statusLine(&buf, .playing, 12.3, 90, 5.1, null, false),
     );
 }
 
-test "statusLine colors state, times, and marks without changing width" {
-    var buf: [256]u8 = undefined;
-    var cols: usize = 0;
+test "statusLine colors state, times, and marks" {
+    var buf: [512]u8 = undefined;
     try std.testing.expectEqualStrings(
-        "\x1b[32m▶\x1b[0m \x1b[1m00:12\x1b[0m\x1b[2m / 01:30\x1b[0m\x1b[2m  SPACE=pause I=mark O=mark D=delete Q=stop\x1b[0m",
-        statusLine(&buf, .playing, 12.3, 90, null, null, true, &cols),
+        "\x1b[32m▶\x1b[0m \x1b[1m00:12\x1b[0m\x1b[2m / 01:30  SPACE=pause ←→=1s SHIFT+←→=5s I=mark O=mark D=delete Q=stop\x1b[0m",
+        statusLine(&buf, .playing, 12.3, 90, null, null, true),
     );
-    try std.testing.expectEqual(@as(usize, 58), cols);
 
     // The marked span is cyan; the ⏸ paused state is yellow.
     try std.testing.expectEqualStrings(
-        "\x1b[33m⏸\x1b[0m \x1b[1m00:12\x1b[0m\x1b[2m / 01:30\x1b[0m\x1b[36m  [00:05–00:12]\x1b[0m\x1b[2m  SPACE=play D=delete R=reset Q=stop\x1b[0m",
-        statusLine(&buf, .paused, 12.3, 90, 12.3, 5.1, true, &cols),
+        "\x1b[33m⏸\x1b[0m \x1b[1m00:12\x1b[0m\x1b[2m / 01:30\x1b[0m\x1b[36m  [00:05–00:12]\x1b[0m\x1b[2m  SPACE=play ←→=1s SHIFT+←→=5s D=delete R=reset Q=stop\x1b[0m",
+        statusLine(&buf, .paused, 12.3, 90, 12.3, 5.1, true),
     );
-    try std.testing.expectEqual(@as(usize, 66), cols);
 }
 
 test "cutSpan normalizes the marks into the interval to cut" {
@@ -627,9 +547,4 @@ test "appendTime formats MM:SS and H:MM:SS" {
     n = 0;
     _ = appendTime(&buf, &n, -5);
     try std.testing.expectEqualStrings("00:00", buf[0..n]);
-}
-
-test "peakBlockBytes is a hundred ms of audio" {
-    try std.testing.expectEqual(@as(usize, 19200), peakBlockBytes(192000)); // 48 kHz stereo
-    try std.testing.expectEqual(@as(usize, 1), peakBlockBytes(0)); // never zero
 }

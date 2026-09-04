@@ -55,3 +55,5 @@ proposed → active → superseded
 | [0007](0007-cut-marked-intervals-in-place.md) | Cut marked intervals in place | active |
 | [0008](0008-finalize-recordings-incrementally-and-atomically.md) | Finalize recordings incrementally and atomically | active |
 | [0009](0009-alternate-screen-live-views.md) | Draw live views on the alternate screen | active |
+| [0010](0010-play-audio-in-process.md) | Play audio in-process instead of spawning afplay | active |
+| [0011](0011-waveform-half-block-grid.md) | Render waveforms as a multi-row half-block grid | active |

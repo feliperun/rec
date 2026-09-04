@@ -14,11 +14,12 @@ them back — without leaving the terminal and without hand-rolled device code.
   stereo)**, encoded by the system's AudioToolbox codec.
 - One file per recording, named `YYYYMMDD-HHMMSS.m4a`, stored under
   `~/recordings/` (created on demand).
-- Recording stops on `Ctrl-C` (or `--duration <sec>` when given); the file
-  must be a complete, finalized container even on interrupt, and a failed
-  encode must leave no partial file behind.
-- While recording, show elapsed time on the terminal (minimum: a ticking
-  `HH:MM:SS` line).
+- Recording stops on `Ctrl-C`, `ESC`, or `--duration <sec>` when given; on a
+  terminal `SPACE` pauses and resumes, and paused audio is dropped (the file
+  keeps only recorded time). The file must be a complete, finalized container
+  even on interrupt, and a failed encode must leave no partial file behind.
+- While recording, show a live view on a terminal: elapsed time plus a
+  multi-row waveform of the sound as it happens.
 
 ### FR2 — List
 - `rec list` prints the recordings in `~/recordings/` with index,
@@ -27,10 +28,15 @@ them back — without leaving the terminal and without hand-rolled device code.
   directory prints a friendly empty state, not a crash.
 
 ### FR3 — Play
-- `rec play <index|filename>` plays a recording through the default
-  output device by invoking the system player `/usr/bin/afplay` as a child
-  process (established macOS tool; no custom output device code).
-- Playbacks are interruptible with `Ctrl-C` (child terminated, no zombies).
+- `rec play <index|filename>` plays a recording through the default output
+  device in-process: the recording is decoded to canonical PCM once and the
+  same samples feed the waveform and the speaker (miniaudio playback).
+- On a terminal playback is interactive: a multi-row waveform opens at the
+  terminal width with a playhead cursor. `SPACE` pauses/resumes; `←`/`→`
+  seek ±1 s and `SHIFT`+`←`/`→` seek ±5 s; `I`/`O` mark a piece to cut, `D`
+  cuts it out in place, `R` resets the marks, `Q`/`Ctrl-C` stops.
+- Off a terminal, playback runs to completion and is interruptible with
+  `Ctrl-C`.
 
 ### FR4 — Interactive mode
 - Running `rec` with no subcommand enters a minimal interactive menu:
