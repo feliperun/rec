@@ -11,6 +11,8 @@ keypress, transcribe it to markdown through Deepgram, and let a local
 coding-agent LLM clean up the transcript or turn it into structured meeting
 notes. One small Zig binary, no Electron, no servers of its own.
 
+<img src="docs/demo.gif" alt="rec recording with a live waveform, then playing back, cutting a region out with two anchors and a confirmed delete, and listing the library" width="100%">
+
 ```
 $ rec list
   #  name                 time  size
