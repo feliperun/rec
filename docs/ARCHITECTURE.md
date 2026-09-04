@@ -38,7 +38,7 @@ verbs in a raw-mode interactive menu.
 | `src/library.zig` | Scans `~/recordings/`, sorts newest-first, formats table |
 | `src/playback.zig` | Interactive play: raw-mode TUI over `/usr/bin/afplay` — live waveform, SPACE pause (SIGSTOP/SIGCONT), I/O marks, D cut, R reset marks, Q stop; prints the `<stem>.md` transcript in full; blocking fallback off a tty |
 | `src/waveform.zig` | Peak accumulation over PCM (100 ms blocks) and one-line Unicode block-bar rendering with played-column dimming and reverse-video selection; terminal width |
-| `src/live.zig` | Resize-safe in-place redraw: row-wrap math and the escape sequence that erases a drawn line block under the current terminal width |
+| `src/live.zig` | Alternate-screen vocabulary for the live views: enter/leave, absolute cursor positioning, line erase, row-wrap math ([ADR 0009](adr/0009-alternate-screen-live-views.md)) |
 | `src/cut.zig` | Removes a marked time interval in place: decode (or read WAV) → frame-aligned slice → re-encode the remainder → replace the original |
 | `src/transcribe.zig` | Spawns `/usr/bin/curl` against Deepgram pre-recorded API |
 | `src/okf.zig` | Renders the OKF markdown transcript (frontmatter + prose) |

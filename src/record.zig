@@ -58,13 +58,42 @@ pub fn recordOnce(
     };
 
     const color = style.detect(io, .stderr());
-    printStderr(io, "Recording to ");
-    printStyledStderr(io, color, style.cyan, path);
-    printStyledStderr(io, color, style.dim, if (key_stop) " (any key or Ctrl-C to stop)\n" else " (Ctrl-C to stop)\n");
+    const tty = std.Io.File.stderr().isTty(io) catch false;
+    // "Recording to <path> (hint)" — display cells of the plain text; the
+    // header height decides where the live line is positioned.
+    const hint: []const u8 = if (key_stop) " (any key or Ctrl-C to stop)" else " (Ctrl-C to stop)";
+    var header_buf: [std.Io.Dir.max_path_bytes + 64]u8 = undefined;
+    var hn: usize = 0;
+    appendStr(&header_buf, &hn, "Recording to ");
+    style.appendStyled(&header_buf, &hn, color, style.cyan, path);
+    style.appendStyled(&header_buf, &hn, color, style.dim, hint);
+    var screen = LiveView{
+        .header = header_buf[0..hn],
+        .header_cells = "Recording to ".len + path.len + hint.len,
+    };
+
+    // The summary prints after the alt-screen leave below (defers run in
+    // reverse registration order): success and failures land on the normal
+    // screen, never inside the live view.
+    var result: Outcome = .none;
+    defer switch (result) {
+        .none => {},
+        .saved => |s| printSaved(io, path, s.dur_csec, s.bytes, color),
+        .failed => |msg| printStderr(io, msg),
+    };
+
+    var esc_buf: [16]u8 = undefined;
+    if (tty) printStderr(io, live.enter(&esc_buf));
+    defer if (tty) printStderr(io, live.leave(&esc_buf));
+
+    if (!tty) {
+        printStderr(io, screen.header);
+        printStderr(io, "\n");
+    }
 
     var encoder = m4a.Encoder.init(temp_path, rec.sample_rate, rec.channels) catch {
         std.Io.Dir.cwd().deleteFile(io, temp_path) catch {};
-        printStderr(io, "record: failed to initialize M4A encoder\n");
+        result = .{ .failed = "record: failed to initialize M4A encoder\n" };
         return 1;
     };
     var encoder_open = true;
@@ -89,64 +118,97 @@ pub fn recordOnce(
     defer tracker.deinit();
     var new_pcm: std.ArrayList(u8) = .empty;
     defer new_pcm.deinit(gpa);
-    var view: std.ArrayList(waveform.Peak) = .empty;
-    defer view.deinit(gpa);
+    var peak_view: std.ArrayList(waveform.Peak) = .empty;
+    defer peak_view.deinit(gpa);
     var consumed: usize = 0;
-    var screen = live.Block{}; // the live line currently on the terminal
 
     while (true) {
         const now = std.Io.Timestamp.now(io, .awake);
-        if (capture.stopRequested()) break;
-        if (deadline) |d| {
-            if (now.nanoseconds >= d.nanoseconds) break;
-        }
-        if (key_stop and stdinKeyPending()) break;
+        if (captureDone(now, deadline, key_stop)) break;
 
         rec.takeNewPcm(&new_pcm, &consumed);
         encoder.write(new_pcm.items) catch {
-            printStderr(io, "record: failed to encode M4A audio\n");
+            result = .{ .failed = "record: failed to encode M4A audio\n" };
             return 1;
         };
         tracker.feed(new_pcm.items);
         const secs: u32 = @intCast(@divTrunc(now.nanoseconds - started_at.nanoseconds, std.time.ns_per_s));
-        printLiveLine(io, secs, tracker.view(&view) catch &.{}, &screen, color);
+        printLiveLine(io, secs, tracker.view(&peak_view) catch &.{}, &screen, tty, color);
         io.sleep(.fromMilliseconds(100), .awake) catch {};
     }
 
     rec.stop();
     // The final callback block may have arrived after the last 100 ms tick.
     rec.takeNewPcm(&new_pcm, &consumed);
-    encoder.write(new_pcm.items) catch {
-        printStderr(io, "record: failed to encode M4A audio\n");
-        return 1;
+    // Duration comes from the PCM actually captured; the size from the
+    // encoded file on disk.
+    const dur_csec: u64 = @as(u64, rec.pcm.items.len) * 100 / byte_rate;
+    const published = publish(io, &encoder, new_pcm.items, dur_csec, temp_path, path, &result);
+    encoder_open = !published;
+    return if (published) 0 else 1;
+}
+
+/// How a recording run ended; printed on the normal screen after the live
+/// view is gone.
+const Outcome = union(enum) { none, saved: struct { dur_csec: u64, bytes: u64 }, failed: []const u8 };
+
+/// True when the capture loop should stop: SIGINT, the duration deadline,
+/// or (in interactive mode) any pressed key.
+fn captureDone(now: std.Io.Timestamp, deadline: ?std.Io.Timestamp, key_stop: bool) bool {
+    if (capture.stopRequested()) return true;
+    if (deadline) |d| {
+        if (now.nanoseconds >= d.nanoseconds) return true;
+    }
+    return key_stop and stdinKeyPending();
+}
+
+/// Final flush and atomic publication of a finished recording: the last PCM
+/// block, the moov-flushing finish, the rename over the public name, and the
+/// size stat. Fills `outcome` and reports whether the file was published, so
+/// the caller can release its encoder-abort guard.
+fn publish(
+    io: std.Io,
+    encoder: *m4a.Encoder,
+    new_pcm: []const u8,
+    dur_csec: u64,
+    temp_path: []const u8,
+    path: []const u8,
+    outcome: *Outcome,
+) bool {
+    encoder.write(new_pcm) catch {
+        outcome.* = .{ .failed = "record: failed to encode M4A audio\n" };
+        return false;
     };
-    // Clear the live line — every row it wrapped across after a resize —
-    // for the summary below.
-    var erase_buf: [64]u8 = undefined;
-    printStderr(io, screen.erase(waveform.termWidth(), &erase_buf));
 
     // Dispose flushes the moov atom. The public name is exposed only after
     // that succeeds, so an interrupted run leaves no corrupt .m4a behind.
     encoder.finish() catch {
-        printStderr(io, "record: failed to finalize M4A audio\n");
-        return 1;
+        outcome.* = .{ .failed = "record: failed to finalize M4A audio\n" };
+        return false;
     };
     std.Io.Dir.rename(std.Io.Dir.cwd(), temp_path, std.Io.Dir.cwd(), path, io) catch {
-        printStderr(io, "record: failed to save M4A audio\n");
-        return 1;
+        outcome.* = .{ .failed = "record: failed to save M4A audio\n" };
+        return false;
     };
-    encoder_open = false;
     const stat = std.Io.Dir.cwd().statFile(io, path, .{}) catch {
-        printStderr(io, "record: failed to write M4A audio\n");
-        return 1;
+        outcome.* = .{ .failed = "record: failed to write M4A audio\n" };
+        return false;
     };
-
-    // Duration comes from the PCM actually captured; the size from the
-    // encoded file on disk.
-    const dur_csec: u64 = @as(u64, rec.pcm.items.len) * 100 / byte_rate;
-    printSaved(io, path, dur_csec, stat.size, color);
-    return 0;
+    outcome.* = .{ .saved = .{ .dur_csec = dur_csec, .bytes = stat.size } };
+    return true;
 }
+
+/// Where the live view stands on the alternate screen: the header sits on
+/// row 1 (redrawn when the width changes, since it may wrap differently),
+/// the live line below it.
+const LiveView = struct {
+    /// The header, composed with color, no trailing newline.
+    header: []const u8,
+    /// Display cells of the plain header text.
+    header_cells: usize,
+    /// Width the header was last drawn at.
+    width: usize = 0,
+};
 
 fn onSigint(sig: std.posix.SIG) callconv(.c) void {
     _ = sig;
@@ -266,14 +328,39 @@ fn digitCount(v: u32) usize {
     return d;
 }
 
-fn printLiveLine(io: std.Io, secs: u32, peaks: []const waveform.Peak, screen: *live.Block, color: bool) void {
-    var erase_buf: [64]u8 = undefined;
-    printStderr(io, screen.erase(waveform.termWidth(), &erase_buf));
-    var cols: usize = 0;
+/// Draws the live view. On a tty: absolutely positioned on the alternate
+/// screen — the header on row 1 (redrawn whenever the width changes, since
+/// it may wrap differently), the live line below it; whatever a resize did
+/// to the grid is overwritten by this tick. Off a tty: a plain single line,
+/// carriage-returned over the previous one.
+fn printLiveLine(io: std.Io, secs: u32, peaks: []const waveform.Peak, screen: *LiveView, tty: bool, color: bool) void {
+    const width = waveform.termWidth();
+    var esc: [16]u8 = undefined;
+    if (tty) {
+        if (width != screen.width) {
+            // Erase the whole previous view — its header rows plus its live
+            // row — then redraw the header; the live line follows below.
+            if (screen.width != 0) {
+                const last = 1 + live.rowsSpanned(screen.header_cells, screen.width) + 1;
+                var row: usize = 1;
+                while (row <= last) : (row += 1) {
+                    printStderr(io, live.moveTo(&esc, row, 1));
+                    printStderr(io, live.clearLine(&esc));
+                }
+            }
+            printStderr(io, live.moveTo(&esc, 1, 1));
+            printStderr(io, screen.header);
+            screen.width = width;
+        }
+        printStderr(io, live.moveTo(&esc, 1 + live.rowsSpanned(screen.header_cells, width), 1));
+        printStderr(io, live.clearLine(&esc));
+    } else {
+        printStderr(io, "\r\x1b[2K");
+    }
     var buf: [4096]u8 = undefined;
-    const line = composeLiveLine(&buf, secs, peaks, waveform.termWidth(), color, &cols);
+    var cols: usize = 0;
+    const line = composeLiveLine(&buf, secs, peaks, width, color, &cols);
     printStderr(io, line);
-    screen.push(cols);
 }
 
 fn printStyledStderr(io: std.Io, color: bool, code: []const u8, text: []const u8) void {

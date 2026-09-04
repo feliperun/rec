@@ -54,3 +54,4 @@ proposed → active → superseded
 | [0006](0006-decode-and-split-audio-in-process.md) | Decode and split audio in-process | superseded |
 | [0007](0007-cut-marked-intervals-in-place.md) | Cut marked intervals in place | active |
 | [0008](0008-finalize-recordings-incrementally-and-atomically.md) | Finalize recordings incrementally and atomically | active |
+| [0009](0009-alternate-screen-live-views.md) | Draw live views on the alternate screen | active |

@@ -102,7 +102,9 @@ Records from the default microphone to `~/recordings/YYYYMMDD-HHMMSS.m4a`
 demand. Without `--duration`, recording stops on Ctrl-C; with `--duration
 <sec>` it stops automatically. On a terminal, a live waveform bar shows the
 recording growing in real time as a VU meter — green quiet, yellow loud, red
-peaking. The container is always finalized — a failed encode leaves no
+peaking. The live view runs on the terminal's alternate screen: your scrollback
+stays clean and resizing the window mid-recording never scrambles the display.
+The container is always finalized — a failed encode leaves no
 partial file behind.
 
 ### list
@@ -126,7 +128,8 @@ The selection can be an index from `list` or a filename (with or without the
 `recordings/` prefix).
 
 On a terminal, playback is interactive: a live waveform bar shows the
-playback position, and when the recording has a transcript (`NAME.md`) it is
+playback position (on the alternate screen, like the recorder's live view), and
+when the recording has a transcript (`NAME.md`) it is
 printed in full first. Keys:
 
 | Key | Action |

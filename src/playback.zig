@@ -191,15 +191,31 @@ fn playInteractive(
 
     const color = style.detect(io, .stderr());
 
+    // The live view owns the alternate screen; messages printed while it is
+    // up would be wiped by the leave, so every exit path restores the normal
+    // screen before printing.
+    var esc_buf: [16]u8 = undefined;
+    var alt_on = std.Io.File.stderr().isTty(io) catch false;
+    if (alt_on) printStderr(io, live.enter(&esc_buf));
+    const leaveAlt = struct {
+        fn f(io_: std.Io, on: *bool, buf: []u8) void {
+            if (!on.*) return;
+            printStderr(io_, live.leave(buf));
+            on.* = false;
+        }
+    }.f;
+
     const child = std.process.spawn(io, .{
         .argv = &.{ afplay_path, abs_path },
     }) catch {
+        leaveAlt(io, &alt_on, &esc_buf);
         printStderr(io, "play: cannot spawn ");
         printStderr(io, afplay_path);
         printStderr(io, "\n");
         return 1;
     };
     const pid: std.posix.pid_t = child.id orelse {
+        leaveAlt(io, &alt_on, &esc_buf);
         printStderr(io, "play: cannot spawn ");
         printStderr(io, afplay_path);
         printStderr(io, "\n");
@@ -212,7 +228,6 @@ fn playInteractive(
     var state: PlayState = .playing;
     var paused_ns: i128 = 0;
     var pause_started = started;
-    var screen = live.Block{}; // the view currently on the terminal
     var exit_code: u8 = 0;
     var reaped = false;
     // The piece to cut, anchored at the positions where I and O were
@@ -242,7 +257,7 @@ fn playInteractive(
         const elapsed_ns = ref.nanoseconds - started.nanoseconds - paused_ns;
         const elapsed_sec = @as(f64, @floatFromInt(@max(elapsed_ns, 0))) / 1e9;
 
-        draw(io, state, elapsed_sec, duration_sec, peaks, mark_in, mark_out, &screen, color);
+        draw(io, state, elapsed_sec, duration_sec, peaks, mark_in, mark_out, color);
 
         switch (readKey(io, tick_ms)) {
             .none => {},
@@ -274,17 +289,19 @@ fn playInteractive(
                 },
                 'd', 'D' => {
                     const span = cutSpan(mark_in, mark_out, duration_sec) orelse {
-                        drawNote(io, "mark the piece with I and O first", &screen, color);
+                        drawNote(io, "mark the piece with I and O first", color);
                         continue :keys;
                     };
                     // A cut needs at least 0.2 s on both sides: the marked
                     // piece must be real, and it must not eat the file.
                     const removed = span[1] - span[0];
                     if (removed < 0.2 or duration_sec - removed < 0.2) {
-                        drawNote(io, "nothing to cut: marks too close or covering everything", &screen, color);
+                        drawNote(io, "nothing to cut: marks too close or covering everything", color);
                         continue :keys;
                     }
                     stopChild(pid, &reaped);
+                    // The cut reports on the normal screen: leave first.
+                    leaveAlt(io, &alt_on, &esc_buf);
                     cut.cutIntervalFile(io, gpa, abs_path, span[0], span[1]) catch |err| {
                         printStderr(io, "play: cannot cut (");
                         printStderr(io, @errorName(err));
@@ -303,6 +320,7 @@ fn playInteractive(
     }
 
     if (!reaped) stopChild(pid, &reaped);
+    leaveAlt(io, &alt_on, &esc_buf);
     printStderr(io, "\n");
     return exit_code;
 }
@@ -343,9 +361,10 @@ fn termWidth() usize {
     return waveform.termWidth();
 }
 
-/// Draws the two-line view in place: everything the previous draw (or note)
-/// left on screen is erased first — including rows wrapped by a resize —
-/// then both lines are rewritten at the current width.
+/// Draws the three-row view on the alternate screen: status on row 1, the
+/// waveform on row 2, and row 3 reserved for transient notes — all
+/// positioned absolutely, so whatever a resize did to the grid is
+/// overwritten by this tick.
 fn draw(
     io: std.Io,
     state: PlayState,
@@ -354,33 +373,33 @@ fn draw(
     peaks: []const waveform.Peak,
     mark_in: ?f64,
     mark_out: ?f64,
-    screen: *live.Block,
     color: bool,
 ) void {
     const width = termWidth();
-    var erase_buf: [64]u8 = undefined;
-    printStderr(io, screen.erase(width, &erase_buf));
-
+    var esc: [16]u8 = undefined;
     var line: [1024]u8 = undefined;
     var cols: usize = 0;
+    printStderr(io, live.moveTo(&esc, 1, 1));
+    printStderr(io, live.clearLine(&esc));
     printStderr(io, statusLine(&line, state, elapsed_sec, duration_sec, mark_in, mark_out, color, &cols));
-    screen.push(cols);
-    printStderr(io, "\n");
+    printStderr(io, live.moveTo(&esc, 2, 1));
+    printStderr(io, live.clearLine(&esc));
     const sel: ?waveform.SelRange = if (cutSpan(mark_in, mark_out, duration_sec)) |s|
         .{ .start_col = playedCols(width, s[0], duration_sec), .end_col = playedCols(width, s[1], duration_sec) }
     else
         null;
     printStderr(io, waveform.renderBar(peaks, width, playedCols(width, elapsed_sec, duration_sec), sel, color, &line));
-    screen.push(width);
+    printStderr(io, live.moveTo(&esc, 3, 1));
+    printStderr(io, live.clearLine(&esc));
 }
 
-/// A transient one-line notice under the view; the next redraw erases it
-/// along with the rest of the block.
-fn drawNote(io: std.Io, msg: []const u8, screen: *live.Block, color: bool) void {
-    printStderr(io, "\x1b[1B\r"); // the row under the waveform
+/// A transient one-line notice on row 3, under the waveform; the next draw
+/// erases it.
+fn drawNote(io: std.Io, msg: []const u8, color: bool) void {
+    var esc: [16]u8 = undefined;
+    printStderr(io, live.moveTo(&esc, 3, 1));
+    printStderr(io, live.clearLine(&esc)); // wipe any previous note first
     printStyledStderr(io, color, style.yellow, msg);
-    printStderr(io, "\x1b[K");
-    screen.push(msg.len); // cells of the plain text; escapes carry no width
 }
 
 fn printStyledStderr(io: std.Io, color: bool, code: []const u8, text: []const u8) void {
