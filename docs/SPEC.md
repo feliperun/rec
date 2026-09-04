@@ -33,8 +33,11 @@ them back — without leaving the terminal and without hand-rolled device code.
   same samples feed the waveform and the speaker (miniaudio playback).
 - On a terminal playback is interactive: a multi-row waveform opens at the
   terminal width with a playhead cursor. `SPACE` pauses/resumes; `←`/`→`
-  seek ±1 s and `SHIFT`+`←`/`→` seek ±5 s; `I`/`O` mark a piece to cut, `D`
-  cuts it out in place, `R` resets the marks, `Q`/`Ctrl-C` stops.
+  seek ±1 s and `SHIFT`+`←`/`→` seek ±5 s; `I`/`O` anchor the region to cut
+  (two full-height cursors with the span reversed between them), `DELETE`
+  asks for confirmation and `ENTER` cuts it out in place (any other key
+  cancels), `R` resets the anchors, `T` transcribes the recording or opens
+  its transcript when one exists, `Q`/`Ctrl-C` stops.
 - Off a terminal, playback runs to completion and is interruptible with
   `Ctrl-C`.
 

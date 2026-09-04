@@ -12,6 +12,7 @@ pub const Key = union(enum) {
     right,
     shift_left,
     shift_right,
+    delete,
 };
 
 /// Waits up to `ms` for a keystroke and parses it. The poll window is what
@@ -63,12 +64,15 @@ pub fn sequenceComplete(seq: []const u8) bool {
     return last >= 0x40 and last <= 0x7e;
 }
 
-/// Classifies a raw keystroke: a plain byte, the arrow keys (xterm CSI
-/// `ESC [ 1;2C` and legacy SS3 `ESC O C`, SHIFT as the `2` modifier), or
-/// nothing for sequences rec has no binding for.
+/// Classifies a raw keystroke: a plain byte (the Delete key in its
+/// backspace spelling included), the arrow keys (xterm CSI `ESC [ 1;2C` and
+/// legacy SS3 `ESC O C`, SHIFT as the `2` modifier), the xterm Delete key
+/// (`ESC [ 3~`), or nothing for sequences rec has no binding for.
 pub fn parseKey(seq: []const u8) Key {
     if (seq.len == 0) return .none;
-    if (seq[0] != 0x1b) return .{ .byte = seq[0] };
+    if (seq[0] != 0x1b) {
+        return if (seq[0] == 0x7f or seq[0] == 0x08) .delete else .{ .byte = seq[0] };
+    }
     if (seq.len == 1) return .{ .byte = 0x1b }; // bare ESC
     if (seq.len < 3) return .none;
     const final = seq[seq.len - 1];
@@ -83,6 +87,11 @@ pub fn parseKey(seq: []const u8) Key {
     return switch (final) {
         'D' => if (shift) .shift_left else .left,
         'C' => if (shift) .shift_right else .right,
+        '~' => blk: {
+            // xterm Delete is parameter 3; every other ~ key is unbound.
+            var first = std.mem.splitScalar(u8, params, ';');
+            break :blk if (std.mem.eql(u8, first.next() orelse "", "3")) .delete else .none;
+        },
         else => .none,
     };
 }
@@ -105,6 +114,14 @@ test "parseKey classifies arrow keys and their shift variants" {
     try std.testing.expectEqual(Key.right, parseKey("\x1bOC"));
     // Unbound sequences (Home, F-keys) classify to nothing.
     try std.testing.expectEqual(Key.none, parseKey("\x1b[A"));
+    try std.testing.expectEqual(Key.none, parseKey("\x1b[15~"));
+}
+
+test "parseKey classifies the delete key in all its spellings" {
+    try std.testing.expectEqual(Key.delete, parseKey("\x7f")); // the Delete key
+    try std.testing.expectEqual(Key.delete, parseKey("\x08")); // legacy backspace
+    try std.testing.expectEqual(Key.delete, parseKey("\x1b[3~")); // xterm Delete
+    // Modifier variants and other ~ keys stay out of the binding.
     try std.testing.expectEqual(Key.none, parseKey("\x1b[15~"));
 }
 

@@ -138,22 +138,24 @@ selection can be an index from `list` or a filename (with or without the
 On a terminal, playback is interactive: the same live view as the recorder —
 a multi-row waveform opening at the terminal's width — plus a bright cursor
 column walking over it at the playback position (on the alternate screen).
-The part already played is bright, the rest dimmed, and the marked piece shows
-in reverse video. When the recording has a transcript (`NAME.md`) it is
-printed in full first. Keys:
+The part already played is bright, the rest dimmed, and a marked region shows
+in reverse video between its two full-height anchor cursors. When the
+recording has a transcript (`NAME.md`) it is printed in full first. Keys:
 
 | Key | Action |
 |-----|--------|
 | `SPACE` | Pause / resume |
 | `←` / `→` | Seek 1 second back / forward |
 | `SHIFT`+`←` / `SHIFT`+`→` | Seek 5 seconds back / forward |
-| `I` / `O` | Mark the start / end of the piece to cut |
-| `D` | Remove the marked piece, replacing the original recording |
-| `R` | Clear the marks |
+| `I` / `O` | Anchor the start / end of the region to cut |
+| `DELETE` | Ask to remove the anchored region — `ENTER` confirms |
+| `T` | Transcribe the recording, or open the transcript if it has one |
+| `R` | Clear the anchors |
 | `Q` / `Ctrl-C` | Stop playback |
 
-Cutting removes the piece between the marks (head, tail, or middle) and
-replaces the original file; the transcript (`NAME.md`) is left untouched.
+Cutting removes the piece between the anchors (head, tail, or middle) after
+`ENTER` confirms the prompt and replaces the original file; the transcript
+(`NAME.md`) is left untouched.
 
 Off a terminal (piped output), playback runs to completion; `Ctrl-C` stops it.
 

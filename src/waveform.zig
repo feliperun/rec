@@ -148,13 +148,17 @@ pub fn columnFractions(peaks: []const Peak, out: []u8) []u8 {
 }
 
 /// How one grid row treats the audio: where playback has reached, the
-/// marked span, the playhead column, and whether VU colors are on.
+/// selected span and its anchor columns, the playhead column, and whether
+/// VU colors are on.
 pub const RowStyle = struct {
     /// Columns at and past this one draw dim (not yet played); maxInt
     /// keeps a whole grid bright, which is how the live recording draws.
     played_cols: usize = std.math.maxInt(usize),
-    /// Columns shown in reverse video (the marked span).
+    /// Columns shown in reverse video (the selected span, edges included).
     sel: ?SelRange = null,
+    /// The selection's anchor columns: full-height cyan bars — the two
+    /// cursors marking where the region starts and ends.
+    sel_edges: ?SelRange = null,
     /// The playhead column: a full-height bright bar over the audio.
     cursor_col: ?usize = null,
     /// VU-meter colors (dim silence, green quiet, yellow mid, red loud).
@@ -165,19 +169,23 @@ pub const RowStyle = struct {
 /// `out` and returns the written slice. Every cell packs two half-rows of
 /// resolution around the grid's middle: '█' fills both, '▀' the top,
 /// '▄' the bottom, ' ' neither. The cursor column draws as a full-height
-/// bar in bright white; a marked span reverses its columns; dim covers
-/// everything at or past `played_cols`. SGR escapes are emitted only on
-/// transitions, and always reset at the end when one was emitted. `out`
-/// must fit rowBufferLen(fractions.len).
+/// bar in bright white and the selection's anchor columns as full-height
+/// cyan bars; a selected span reverses its columns; dim covers everything
+/// at or past `played_cols`. SGR escapes are emitted only on transitions,
+/// and always reset at the end when one was emitted. `out` must fit
+/// rowBufferLen(fractions.len).
 pub fn renderRow(fractions: []const u8, height: usize, row: usize, opts: RowStyle, out: []u8) []const u8 {
     var n: usize = 0;
     var cur: []const u8 = ""; // the SGR sequence in effect, "" = default
     var col: usize = 0;
     while (col < fractions.len) : (col += 1) {
         const is_cursor = opts.cursor_col != null and opts.cursor_col.? == col;
+        const is_edge = if (opts.sel_edges) |e| e.start_col == col or e.end_col == col else false;
         const in_sel = if (opts.sel) |s| s.start_col <= col and col <= s.end_col else false;
         const want: []const u8 = if (is_cursor)
             style.white
+        else if (is_edge)
+            style.cyan
         else if (in_sel)
             "\x1b[7m"
         else if (col >= opts.played_cols)
@@ -189,7 +197,7 @@ pub fn renderRow(fractions: []const u8, height: usize, row: usize, opts: RowStyl
             if (want.len > 0) n = appendStr(out, n, want);
             cur = want;
         }
-        n = appendStr(out, n, cellGlyph(fractions[col], height, row, is_cursor));
+        n = appendStr(out, n, cellGlyph(fractions[col], height, row, is_cursor or is_edge));
     }
     if (cur.len > 0) n = appendStr(out, n, style.reset);
     return out[0..n];
@@ -207,10 +215,10 @@ fn levelSgr(fraction: u8) []const u8 {
 
 /// The glyph at one cell: the column's extent in half-rows — the square
 /// root-scaled fraction of the `2·height` half-rows, centered on the
-/// grid's middle — intersected with this row's top and bottom half. The
-/// cursor overrides the shape and fills the whole column.
-fn cellGlyph(fraction: u8, height: usize, row: usize, cursor: bool) []const u8 {
-    if (cursor) return "█";
+/// grid's middle — intersected with this row's top and bottom half. A
+/// full column (the cursor, a selection anchor) overrides the shape.
+fn cellGlyph(fraction: u8, height: usize, row: usize, full: bool) []const u8 {
+    if (full) return "█";
     const extent: usize = @intFromFloat(
         @as(f64, @floatFromInt(fraction)) / 255.0 * @as(f64, @floatFromInt(height)) + 0.5,
     );
@@ -390,6 +398,31 @@ test "renderRow shows the marked span in reverse video" {
     try std.testing.expectEqualStrings(
         "\x1b[97m█\x1b[0m\x1b[7m█\x1b[0m██",
         renderRow(&f, 1, 0, .{ .cursor_col = 0, .sel = .{ .start_col = 0, .end_col = 1 } }, &buf),
+    );
+}
+
+test "renderRow draws the selection anchors as full-height columns" {
+    var buf: [rowBufferLen(8)]u8 = undefined;
+    const f = [_]u8{ 255, 255, 255, 255, 255 };
+
+    // Two anchors stand as full-height cyan columns over a reversed span;
+    // the interior keeps the reverse video.
+    try std.testing.expectEqualStrings(
+        "█\x1b[36m█\x1b[0m\x1b[7m█\x1b[0m\x1b[36m█\x1b[0m█",
+        renderRow(&f, 1, 0, .{
+            .sel = .{ .start_col = 1, .end_col = 3 },
+            .sel_edges = .{ .start_col = 1, .end_col = 3 },
+        }, &buf),
+    );
+    // A single anchor drawn alone (one mark set, the playhead elsewhere).
+    try std.testing.expectEqualStrings(
+        " \x1b[36m█\x1b[0m ",
+        renderRow(&[_]u8{ 0, 0, 0 }, 10, 4, .{ .sel_edges = .{ .start_col = 1, .end_col = 1 } }, &buf),
+    );
+    // The cursor wins over an anchor.
+    try std.testing.expectEqualStrings(
+        "\x1b[97m█\x1b[0m ",
+        renderRow(&[_]u8{ 0, 0 }, 10, 4, .{ .cursor_col = 0, .sel_edges = .{ .start_col = 0, .end_col = 0 } }, &buf),
     );
 }
 
