@@ -7,15 +7,24 @@
 
 const std = @import("std");
 
-/// Enters the alternate screen and homes the cursor on a cleared viewport.
+/// Enters the alternate screen and homes the cursor on a cleared viewport,
+/// hiding the hardware cursor — the views redraw whole rows each tick, so
+/// the terminal's own blinking cursor would only flicker over them.
 pub fn enter(buf: []u8) []const u8 {
-    return buf[0..append(buf, "\x1b[?1049h\x1b[H\x1b[2J", 0)];
+    return buf[0..append(buf, "\x1b[?1049h\x1b[H\x1b[2J\x1b[?25l", 0)];
 }
 
-/// Leaves the alternate screen, restoring the view the process started with.
+/// Leaves the alternate screen, restoring the view the process started with
+/// and the hardware cursor.
 pub fn leave(buf: []u8) []const u8 {
-    return buf[0..append(buf, "\x1b[?1049l", 0)];
+    return buf[0..append(buf, "\x1b[?25h\x1b[?1049l", 0)];
 }
+
+/// Synchronized-update brackets (DECSET 2026): a terminal that understands
+/// them draws everything between begin and end as one tear-free frame;
+/// terminals without the extension ignore both and are none the worse.
+pub const sync_begin = "\x1b[?2026h";
+pub const sync_end = "\x1b[?2026l";
 
 /// Absolute cursor position (1-based row and column).
 pub fn moveTo(buf: []u8, row: usize, col: usize) []const u8 {
@@ -75,9 +84,15 @@ test "rowsSpanned wraps once per full terminal width" {
 
 test "alt screen and cursor positioning sequences" {
     var buf: [32]u8 = undefined;
-    try std.testing.expectEqualStrings("\x1b[?1049h\x1b[H\x1b[2J", enter(&buf));
-    try std.testing.expectEqualStrings("\x1b[?1049l", leave(&buf));
+    // Entering hides the hardware cursor: it would flicker over the rows.
+    try std.testing.expectEqualStrings("\x1b[?1049h\x1b[H\x1b[2J\x1b[?25l", enter(&buf));
+    // Leaving restores it before dropping the alternate screen.
+    try std.testing.expectEqualStrings("\x1b[?25h\x1b[?1049l", leave(&buf));
     try std.testing.expectEqualStrings("\x1b[2K", clearLine(&buf));
     try std.testing.expectEqualStrings("\x1b[1;1H", moveTo(&buf, 1, 1));
     try std.testing.expectEqualStrings("\x1b[12;34H", moveTo(&buf, 12, 34));
+    // One bracketed frame update: terminals that understand it batch the
+    // whole write into one tear-free refresh; others ignore it.
+    try std.testing.expectEqualStrings("\x1b[?2026h", sync_begin);
+    try std.testing.expectEqualStrings("\x1b[?2026l", sync_end);
 }

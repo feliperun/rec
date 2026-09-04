@@ -89,7 +89,7 @@ pub fn recordOnce(
         .failed => |msg| printStderr(io, msg),
     };
 
-    var esc_buf: [16]u8 = undefined;
+    var esc_buf: [32]u8 = undefined; // enter/leave fit; check live.enter if you grow them
     if (view_tty) printStderr(io, live.enter(&esc_buf));
     defer if (view_tty) printStderr(io, live.leave(&esc_buf));
 
@@ -148,6 +148,11 @@ pub fn recordOnce(
     defer peak_view.deinit(gpa);
     var consumed: usize = 0;
 
+    // The whole view is composed here and written in one shot per tick —
+    // many small writes are what made the view flicker.
+    var frame: std.ArrayList(u8) = .empty;
+    defer frame.deinit(gpa);
+
     // Pausing (SPACE) drops incoming audio instead of encoding it, so the
     // timer counts recorded time only and the published duration comes from
     // the encoded bytes.
@@ -199,7 +204,7 @@ pub fn recordOnce(
 
         // readKey's poll window is the tick pacing; no extra sleep.
         const secs: u32 = @intCast(@divTrunc(active, std.time.ns_per_s));
-        printLiveView(io, secs, paused, tracker.view(&peak_view) catch &.{}, &screen, view_tty, color);
+        printLiveView(io, gpa, &frame, secs, paused, tracker.view(&peak_view) catch &.{}, &screen, view_tty, color);
     }
 
     rec.stop();
@@ -335,33 +340,55 @@ fn durationNanoseconds(sec: f64) i96 {
     return @intFromFloat(clamped * 1_000_000_000.0);
 }
 
-/// Draws the live view. On a tty: absolutely positioned on the alternate
-/// screen — the header on row 1 (redrawn whenever the width changes, since
-/// it may wrap differently), the status line and the waveform grid below
-/// it; whatever a resize did to the grid is overwritten by this tick. Off a
+/// Draws the live view, composing everything into `frame` and writing it
+/// once. On a tty: absolutely positioned on the alternate screen behind a
+/// synchronized-update bracket — the header on row 1 (redrawn whenever the
+/// width changes, since it may wrap differently), the status line and the
+/// waveform grid below it; whatever a resize did to the grid is overwritten
+/// by this tick, and the single write keeps the view flicker-free. Off a
 /// tty: a plain single line, carriage-returned over the previous one, with
 /// a one-row slice of the waveform as the meter.
-fn printLiveView(io: std.Io, secs: u32, paused: bool, peaks: []const waveform.Peak, screen: *LiveView, tty: bool, color: bool) void {
+fn printLiveView(
+    io: std.Io,
+    gpa: std.mem.Allocator,
+    frame: *std.ArrayList(u8),
+    secs: u32,
+    paused: bool,
+    peaks: []const waveform.Peak,
+    screen: *LiveView,
+    tty: bool,
+    color: bool,
+) void {
     const width = @min(waveform.termWidth(), waveform.max_columns);
     var esc: [16]u8 = undefined;
     var line: [waveform.rowBufferLen(waveform.max_columns)]u8 = undefined;
     var fractions: [waveform.max_columns]u8 = undefined;
 
+    frame.clearRetainingCapacity();
+    const put = struct {
+        fn f(fr: *std.ArrayList(u8), al: std.mem.Allocator, s: []const u8) void {
+            fr.appendSlice(al, s) catch {};
+        }
+    }.f;
+
     if (!tty) {
-        printStderr(io, "\r\x1b[2K");
+        put(frame, gpa, "\r\x1b[2K");
         var cells: usize = 0;
-        printStderr(io, composeStatus(&line, secs, paused, color, &cells));
+        put(frame, gpa, composeStatus(&line, secs, paused, color, &cells));
         const bar_width = width -| cells;
         const fr = waveform.columnFractions(peaks, fractions[0..bar_width]);
-        printStderr(io, waveform.renderRow(
+        put(frame, gpa, waveform.renderRow(
             fr,
             waveform.view_height,
             waveform.view_height / 2,
             .{ .color = color },
             &line,
         ));
+        printStderr(io, frame.items);
         return;
     }
+
+    put(frame, gpa, live.sync_begin);
 
     const header_rows = live.rowsSpanned(screen.header_cells, width);
     if (width != screen.width) {
@@ -371,28 +398,31 @@ fn printLiveView(io: std.Io, secs: u32, paused: bool, peaks: []const waveform.Pe
             const last = 1 + live.rowsSpanned(screen.header_cells, screen.width) + waveform.view_height;
             var row: usize = 1;
             while (row <= last) : (row += 1) {
-                printStderr(io, live.moveTo(&esc, row, 1));
-                printStderr(io, live.clearLine(&esc));
+                put(frame, gpa, live.moveTo(&esc, row, 1));
+                put(frame, gpa, live.clearLine(&esc));
             }
         }
-        printStderr(io, live.moveTo(&esc, 1, 1));
-        printStderr(io, screen.header);
+        put(frame, gpa, live.moveTo(&esc, 1, 1));
+        put(frame, gpa, screen.header);
         screen.width = width;
     }
 
     const status_row = 1 + header_rows;
-    printStderr(io, live.moveTo(&esc, status_row, 1));
-    printStderr(io, live.clearLine(&esc));
+    put(frame, gpa, live.moveTo(&esc, status_row, 1));
+    put(frame, gpa, live.clearLine(&esc));
     var cells: usize = 0;
-    printStderr(io, composeStatus(&line, secs, paused, color, &cells));
+    put(frame, gpa, composeStatus(&line, secs, paused, color, &cells));
 
     const fr = waveform.columnFractions(peaks, fractions[0..width]);
     var r: usize = 0;
     while (r < waveform.view_height) : (r += 1) {
-        printStderr(io, live.moveTo(&esc, status_row + 1 + r, 1));
-        printStderr(io, live.clearLine(&esc));
-        printStderr(io, waveform.renderRow(fr, waveform.view_height, r, .{ .color = color }, &line));
+        put(frame, gpa, live.moveTo(&esc, status_row + 1 + r, 1));
+        put(frame, gpa, live.clearLine(&esc));
+        put(frame, gpa, waveform.renderRow(fr, waveform.view_height, r, .{ .color = color }, &line));
     }
+
+    put(frame, gpa, live.sync_end);
+    printStderr(io, frame.items);
 }
 
 /// The live status line: a red ⏺ (yellow ⏸ when paused), the bold timer,

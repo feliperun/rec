@@ -31,6 +31,8 @@ class Screen:
         self.pending = False
         self.alt = False
         self.main = None
+        self.partial = bytearray()  # bytes of a glyph split across reads
+        self.esc = bytearray()  # bytes of an escape sequence split across reads
 
     def scroll_up(self):
         del self.grid[0], self.soft[0]
@@ -127,7 +129,9 @@ def skip_osc(data, i):
 
 def feed_plain(screen, b, data, i):
     """Consume one non-escape byte; returns how many bytes it swallowed
-    (the UTF-8 width for printable text, 1 otherwise)."""
+    (the UTF-8 width for printable text, 1 otherwise). A glyph whose bytes
+    end past this chunk stays in screen.partial, like a real terminal keeps
+    partial input until the rest arrives."""
     if b == 0x0D:
         screen.cx, screen.pending = 0, False
     elif b == 0x0A:
@@ -137,14 +141,57 @@ def feed_plain(screen, b, data, i):
         screen.pending = False
     elif b >= 0x20:
         n = utf8_len(b)
-        screen.putc(data[i : i + n].decode("utf-8", "replace"))
-        return n
+        chunk = data[i : i + n]
+        if len(chunk) < n:
+            screen.partial += chunk
+            return len(chunk)
+        screen.putc(decode_glyph(screen, chunk))
+        return len(chunk)
     return 1
+
+
+def decode_glyph(screen, chunk):
+    """Completes `chunk` with any bytes held from the previous read and
+    decodes one glyph."""
+    screen.partial += chunk
+    if len(screen.partial) < utf8_len(screen.partial[0]):
+        return None
+    try:
+        g = bytes(screen.partial).decode("utf-8")
+    except UnicodeDecodeError:
+        g = "�"
+    screen.partial.clear()
+    return g
 
 
 def feed(screen, data):
     i = 0
     while i < len(data):
+        if screen.partial:
+            g = decode_glyph(screen, data[i : i + 1])
+            i += 1
+            if g is not None:
+                screen.putc(g)
+            continue
+        if screen.esc:
+            # A sequence held from the previous read: complete it against
+            # the new bytes.
+            buf = bytes(screen.esc) + data[i:]
+            m = CSI.match(buf)
+            if m:
+                handle_csi(screen, m.group(1).decode(), m.group(2).decode())
+                i += m.end() - len(screen.esc)
+                screen.esc.clear()
+                continue
+            if buf[1:2] == b"]":
+                end = skip_osc(buf, 0)
+                if end < len(buf):
+                    i += end - len(screen.esc)
+                    screen.esc.clear()
+                    continue
+            screen.esc += data[i:]  # still incomplete; keep holding
+            i = len(data)
+            continue
         b = data[i]
         if b == 0x1B:
             m = CSI.match(data, i)
@@ -155,7 +202,10 @@ def feed(screen, data):
             if data[i + 1 : i + 2] == b"]":  # OSC: title etc., no screen effect
                 i = skip_osc(data, i)
                 continue
-            i += 1  # lone escape byte
+            # The chunk ends inside a sequence — hold it, like a real
+            # terminal waits for the rest of the escape.
+            screen.esc += data[i:]
+            i = len(data)
             continue
         i += feed_plain(screen, b, data, i)
 
