@@ -495,6 +495,7 @@ test {
     _ = @import("playback.zig");
     _ = @import("prompts.zig");
     _ = @import("setupcmd.zig");
+    _ = @import("style.zig");
     _ = @import("tui.zig");
     _ = @import("transcribe.zig");
     _ = @import("okf.zig");

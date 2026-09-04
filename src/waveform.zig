@@ -4,6 +4,7 @@
 //! computation is kept free of I/O so every behavior is testable offline.
 
 const std = @import("std");
+const style = @import("style.zig");
 
 /// Absolute sample amplitude (0..32768) of one PCM block.
 pub const Peak = u16;
@@ -108,31 +109,38 @@ pub const SelRange = struct {
 /// Renders `peaks` as one line of at most `width` block glyphs: when there
 /// are more peaks than columns, each column shows the max peak of its slice;
 /// when fewer, the line is padded with silence. Columns at `played_cols` and
-/// beyond are dimmed (ANSI), the rest at normal intensity — pass `width`
-/// (or more) to keep the whole bar bright, e.g. while recording. A marked
-/// `sel` range shows in reverse video, which wins over dimming. Returns the
-/// written slice of `out`.
-pub fn renderBar(peaks: []const Peak, width: usize, played_cols: usize, sel: ?SelRange, out: []u8) []const u8 {
+/// beyond are dimmed; with `color` on, the rest carry a VU-meter ramp —
+/// silence dim, quiet green, mid yellow, loud red. A marked `sel` range
+/// shows in reverse video, which wins over both. SGR escapes are emitted
+/// only on transitions, and always reset at the end when one was emitted.
+/// Returns the written slice of `out`.
+pub fn renderBar(peaks: []const Peak, width: usize, played_cols: usize, sel: ?SelRange, color: bool, out: []u8) []const u8 {
     var n: usize = 0;
-    var dim = false; // current intensity, flipped only on transitions
-    var rev = false; // current reverse-video state, flipped only on transitions
+    var cur: []const u8 = ""; // the SGR sequence in effect, "" = default
     var col: usize = 0;
     while (col < width) : (col += 1) {
         const in_sel = if (sel) |s| s.start_col <= col and col <= s.end_col else false;
-        const want_dim = col >= played_cols;
-        if (in_sel != rev) {
-            n = appendStr(out, n, if (in_sel) "\x1b[0m\x1b[7m" else "\x1b[0m");
-            rev = in_sel;
-            dim = false;
+        const level = columnLevel(peaks, col, width);
+        const want: []const u8 = if (in_sel)
+            "\x1b[0m\x1b[7m"
+        else if (col >= played_cols)
+            "\x1b[2m"
+        else if (color) levelSgr(level)
+        else "";
+        if (!std.mem.eql(u8, want, cur)) {
+            if (cur.len > 0) n = appendStr(out, n, style.reset);
+            if (want.len > 0) n = appendStr(out, n, want);
+            cur = want;
         }
-        if (!in_sel and want_dim != dim) {
-            n = appendStr(out, n, if (want_dim) "\x1b[2m" else "\x1b[0m");
-            dim = want_dim;
-        }
-        n = appendStr(out, n, blocks[columnLevel(peaks, col, width)]);
+        n = appendStr(out, n, blocks[level]);
     }
-    if (rev or dim) n = appendStr(out, n, "\x1b[0m");
+    if (cur.len > 0) n = appendStr(out, n, style.reset);
     return out[0..n];
+}
+
+/// The VU-meter ramp: silence barely visible, loudness red.
+fn levelSgr(level: usize) []const u8 {
+    return if (level == 0) style.dim else if (level <= 3) style.green else if (level <= 5) style.yellow else style.red;
 }
 
 /// The block level (0..7) shown at `col`: peak-for-column while the audio is
@@ -231,7 +239,7 @@ test "renderBar maps peaks to block levels and pads with silence" {
     var buf: [128]u8 = undefined;
     // 0, 8192, 16384, 24576, 32767 → levels 0, 2, 4, 6, 7; rest is silence.
     const peaks = [_]Peak{ 0, 8192, 16384, 24576, 32767 };
-    const line = renderBar(&peaks, 10, 10, null, &buf);
+    const line = renderBar(&peaks, 10, 10, null, false, &buf);
     try std.testing.expectEqualStrings("▁▃▅▇█▁▁▁▁▁", line);
 }
 
@@ -240,18 +248,18 @@ test "renderBar compresses more peaks than columns by max per column" {
     // 20 peaks in (0, 16384) pairs, width 10 → every column is the pair max.
     var peaks: [20]Peak = undefined;
     for (&peaks, 0..) |*p, i| p.* = if (i % 2 == 1) 16384 else 0;
-    const line = renderBar(&peaks, 10, 10, null, &buf);
+    const line = renderBar(&peaks, 10, 10, null, false, &buf);
     try std.testing.expectEqualStrings("▅▅▅▅▅▅▅▅▅▅", line);
 }
 
 test "renderBar dims columns at and past the playback position" {
     var buf: [128]u8 = undefined;
     const peaks = [_]Peak{ 8192, 8192, 8192, 8192 };
-    try std.testing.expectEqualStrings("▃▃\x1b[2m▃▃\x1b[0m", renderBar(&peaks, 4, 2, null, &buf));
+    try std.testing.expectEqualStrings("▃▃\x1b[2m▃▃\x1b[0m", renderBar(&peaks, 4, 2, null, false, &buf));
 
     // Nothing played: the whole bar is dim; everything played: no escapes.
-    try std.testing.expectEqualStrings("\x1b[2m▃▃▃▃\x1b[0m", renderBar(&peaks, 4, 0, null, &buf));
-    try std.testing.expectEqualStrings("▃▃▃▃", renderBar(&peaks, 4, 4, null, &buf));
+    try std.testing.expectEqualStrings("\x1b[2m▃▃▃▃\x1b[0m", renderBar(&peaks, 4, 0, null, false, &buf));
+    try std.testing.expectEqualStrings("▃▃▃▃", renderBar(&peaks, 4, 4, null, false, &buf));
 }
 
 test "renderBar shows the marked span in reverse video" {
@@ -261,17 +269,27 @@ test "renderBar shows the marked span in reverse video" {
     // A middle mark reverses its column; dimming resumes past it.
     try std.testing.expectEqualStrings(
         "▃\x1b[0m\x1b[7m▃\x1b[0m\x1b[2m▃▃\x1b[0m",
-        renderBar(&peaks, 4, 1, .{ .start_col = 1, .end_col = 1 }, &buf),
+        renderBar(&peaks, 4, 1, .{ .start_col = 1, .end_col = 1 }, false, &buf),
     );
     // A full span overrides the dim whole-bar state entirely.
     try std.testing.expectEqualStrings(
         "\x1b[0m\x1b[7m▃▃▃▃\x1b[0m",
-        renderBar(&peaks, 4, 0, .{ .start_col = 0, .end_col = 3 }, &buf),
+        renderBar(&peaks, 4, 0, .{ .start_col = 0, .end_col = 3 }, false, &buf),
     );
 }
 
 test "renderBar with no peaks is a line of silence" {
     var buf: [64]u8 = undefined;
-    try std.testing.expectEqualStrings("▁▁▁", renderBar(&.{}, 3, 3, null, &buf));
-    try std.testing.expectEqualStrings("", renderBar(&.{}, 0, 0, null, &buf));
+    try std.testing.expectEqualStrings("▁▁▁", renderBar(&.{}, 3, 3, null, false, &buf));
+    try std.testing.expectEqualStrings("", renderBar(&.{}, 0, 0, null, false, &buf));
+}
+
+test "renderBar colors the levels as a VU meter when color is on" {
+    var buf: [256]u8 = undefined;
+    // 0, 8192, 16384, 24576, 32767 → dim, green, yellow, then two reds.
+    const peaks = [_]Peak{ 0, 8192, 16384, 24576, 32767 };
+    try std.testing.expectEqualStrings(
+        "\x1b[2m▁\x1b[0m\x1b[32m▃\x1b[0m\x1b[33m▅\x1b[0m\x1b[31m▇█\x1b[0m",
+        renderBar(&peaks, 5, 5, null, true, &buf),
+    );
 }

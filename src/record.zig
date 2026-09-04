@@ -3,6 +3,7 @@ const capture = @import("capture.zig");
 const library = @import("library.zig");
 const live = @import("live.zig");
 const m4a = @import("m4a.zig");
+const style = @import("style.zig");
 const waveform = @import("waveform.zig");
 
 /// The record command body, shared by the CLI and the interactive 'r' key:
@@ -56,9 +57,10 @@ pub fn recordOnce(
         return 1;
     };
 
+    const color = style.detect(io, .stderr());
     printStderr(io, "Recording to ");
-    printStderr(io, path);
-    printStderr(io, if (key_stop) " (any key or Ctrl-C to stop)\n" else " (Ctrl-C to stop)\n");
+    printStyledStderr(io, color, style.cyan, path);
+    printStyledStderr(io, color, style.dim, if (key_stop) " (any key or Ctrl-C to stop)\n" else " (Ctrl-C to stop)\n");
 
     var encoder = m4a.Encoder.init(temp_path, rec.sample_rate, rec.channels) catch {
         std.Io.Dir.cwd().deleteFile(io, temp_path) catch {};
@@ -107,7 +109,7 @@ pub fn recordOnce(
         };
         tracker.feed(new_pcm.items);
         const secs: u32 = @intCast(@divTrunc(now.nanoseconds - started_at.nanoseconds, std.time.ns_per_s));
-        printLiveLine(io, secs, tracker.view(&view) catch &.{}, &screen);
+        printLiveLine(io, secs, tracker.view(&view) catch &.{}, &screen, color);
         io.sleep(.fromMilliseconds(100), .awake) catch {};
     }
 
@@ -142,7 +144,7 @@ pub fn recordOnce(
     // Duration comes from the PCM actually captured; the size from the
     // encoded file on disk.
     const dur_csec: u64 = @as(u64, rec.pcm.items.len) * 100 / byte_rate;
-    printSaved(io, path, dur_csec, stat.size);
+    printSaved(io, path, dur_csec, stat.size, color);
     return 0;
 }
 
@@ -213,60 +215,89 @@ fn durationNanoseconds(sec: f64) i96 {
     return @intFromFloat(clamped * 1_000_000_000.0);
 }
 
-/// The live recording line: carriage return, timer, and the growing
-/// waveform bar filling the rest of `width`, all bright. Composed in one
-/// pass for a single write per tick. `cols_out` receives the line's display
-/// columns (everything but the `\r`, with ⏺ counted as one cell) so the
-/// caller can erase it again after a resize wraps it.
-fn composeLiveLine(buf: []u8, secs: u32, peaks: []const waveform.Peak, width: usize, cols_out: *usize) []const u8 {
+/// The live recording line: carriage return, a red ⏺, the bold timer, and
+/// the growing VU-colored waveform bar filling the rest of `width`.
+/// Composed in one pass for a single write per tick. `cols_out` receives
+/// the line's display columns (everything but the `\r`; escapes have no
+/// width) so the caller can erase it again after a resize wraps it.
+fn composeLiveLine(buf: []u8, secs: u32, peaks: []const waveform.Peak, width: usize, color: bool, cols_out: *usize) []const u8 {
     var n: usize = 0;
-    appendStr(buf, &n, "\r ⏺ ");
+    var cells: usize = 0;
+    appendStr(buf, &n, "\r ");
+    cells += 1;
+    style.appendStyled(buf, &n, color, style.red, "⏺");
+    cells += 1;
+    appendStr(buf, &n, " ");
+    cells += 1;
     const hours = secs / 3600;
+    style.begin(buf, &n, color, style.bold);
     if (hours > 0) {
         appendUint(buf, &n, hours);
+        cells += digitCount(hours);
         buf[n] = ':';
         n += 1;
         put2(buf[n..][0..2], (secs / 60) % 60);
         n += 2;
+        cells += 3;
     } else {
         put2(buf[n..][0..2], (secs / 60) % 60);
         n += 2;
+        cells += 2;
     }
     buf[n] = ':';
     n += 1;
     put2(buf[n..][0..2], secs % 60);
     n += 2;
+    cells += 3;
+    style.end(buf, &n, color);
     appendStr(buf, &n, " ");
-    const bar_width = @min(width -| n, 300);
-    n += @intCast(waveform.renderBar(peaks, bar_width, bar_width, null, buf[n..]).len);
-    // Display columns: the byte count minus the \r and the extra bytes of
-    // the multi-byte glyphs (⏺ and each block are one cell).
-    cols_out.* = n - 3 - 2 * bar_width;
+    cells += 1;
+    const bar_width = @min(width -| cells, 300);
+    n += @intCast(waveform.renderBar(peaks, bar_width, bar_width, null, color, buf[n..]).len);
+    cols_out.* = cells + bar_width;
     return buf[0..n];
 }
 
-fn printLiveLine(io: std.Io, secs: u32, peaks: []const waveform.Peak, screen: *live.Block) void {
+/// Decimal digits of `v` (v > 0).
+fn digitCount(v: u32) usize {
+    var d: usize = 1;
+    var x = v / 10;
+    while (x > 0) : (x /= 10) d += 1;
+    return d;
+}
+
+fn printLiveLine(io: std.Io, secs: u32, peaks: []const waveform.Peak, screen: *live.Block, color: bool) void {
     var erase_buf: [64]u8 = undefined;
     printStderr(io, screen.erase(waveform.termWidth(), &erase_buf));
     var cols: usize = 0;
-    var buf: [1024]u8 = undefined;
-    const line = composeLiveLine(&buf, secs, peaks, waveform.termWidth(), &cols);
+    var buf: [4096]u8 = undefined;
+    const line = composeLiveLine(&buf, secs, peaks, waveform.termWidth(), color, &cols);
     printStderr(io, line);
     screen.push(cols);
 }
 
-fn printSaved(io: std.Io, path: []const u8, dur_csec: u64, bytes: u64) void {
-    var buf: [128]u8 = undefined;
+fn printStyledStderr(io: std.Io, color: bool, code: []const u8, text: []const u8) void {
+    var buf: [std.Io.Dir.max_path_bytes + 64]u8 = undefined;
+    var n: usize = 0;
+    style.appendStyled(&buf, &n, color, code, text);
+    printStderr(io, buf[0..n]);
+}
+
+fn printSaved(io: std.Io, path: []const u8, dur_csec: u64, bytes: u64, color: bool) void {
+    var buf: [std.Io.Dir.max_path_bytes + 128]u8 = undefined;
     var n: usize = 0;
     appendStr(&buf, &n, "\nSaved ");
-    appendStr(&buf, &n, path);
+    style.appendStyled(&buf, &n, color, style.cyan, path);
+    style.begin(&buf, &n, color, style.dim);
     appendStr(&buf, &n, " (");
     appendUint(&buf, &n, dur_csec / 100);
     appendStr(&buf, &n, ".");
     append2(&buf, &n, dur_csec % 100);
     appendStr(&buf, &n, " s, ");
     appendUint(&buf, &n, bytes / 1024);
-    appendStr(&buf, &n, " KiB)\n");
+    appendStr(&buf, &n, " KiB)");
+    style.end(&buf, &n, color);
+    appendStr(&buf, &n, "\n");
     printStderr(io, buf[0..n]);
 }
 
@@ -325,30 +356,47 @@ fn printStderr(io: std.Io, msg: []const u8) void {
 }
 
 test "composeLiveLine draws the timer and a growing bar" {
-    var buf: [1024]u8 = undefined;
+    var buf: [4096]u8 = undefined;
     // Levels 0,2,4,6,7 on the first five columns; the rest is silence.
     const peaks = [_]waveform.Peak{ 0, 8192, 16384, 24576, 32767 };
     var cols: usize = 0;
-    const line = composeLiveLine(&buf, 5, &peaks, 20, &cols);
-    try std.testing.expectEqualStrings("\r ⏺ 00:05 ▁▃▅▇█▁▁▁", line);
-    // 3 cells of " ⏺ " + 5 timer + 1 space + 8 bar.
-    try std.testing.expectEqual(@as(usize, 17), cols);
+    const line = composeLiveLine(&buf, 5, &peaks, 20, false, &cols);
+    try std.testing.expectEqualStrings("\r ⏺ 00:05 ▁▃▅▇█▁▁▁▁▁▁", line);
+    // 3 cells of " ⏺ " + 5 timer + 1 space + 11 bar.
+    try std.testing.expectEqual(@as(usize, 20), cols);
 }
 
 test "composeLiveLine switches to H:MM:SS past an hour" {
-    var buf: [1024]u8 = undefined;
+    var buf: [4096]u8 = undefined;
     var cols: usize = 0;
-    // 40 - 14 bytes of prefix/timer = 26 bar columns.
-    const line = composeLiveLine(&buf, 3661, &.{}, 40, &cols);
-    try std.testing.expectEqualStrings("\r ⏺ 1:01:01 " ++ ("▁" ** 26), line);
-    // 3 cells of " ⏺ " + 7 timer + 1 space + 26 bar.
-    try std.testing.expectEqual(@as(usize, 37), cols);
+    // 40 - 11 cells of prefix/timer = 29 bar columns.
+    const line = composeLiveLine(&buf, 3661, &.{}, 40, false, &cols);
+    try std.testing.expectEqualStrings("\r ⏺ 1:01:01 " ++ ("▁" ** 29), line);
+    try std.testing.expectEqual(@as(usize, 40), cols);
 }
 
 test "composeLiveLine clamps the bar on a narrow terminal" {
     var buf: [64]u8 = undefined;
     var cols: usize = 0;
-    const line = composeLiveLine(&buf, 5, &.{}, 8, &cols);
+    const line = composeLiveLine(&buf, 5, &.{}, 8, false, &cols);
     try std.testing.expectEqualStrings("\r ⏺ 00:05 ", line);
     try std.testing.expectEqual(@as(usize, 9), cols);
+}
+
+test "composeLiveLine colors the dot, timer, and levels" {
+    var buf: [4096]u8 = undefined;
+    var plain_buf: [4096]u8 = undefined;
+    const peaks = [_]waveform.Peak{ 0, 8192, 16384, 24576, 32767 };
+    var cols: usize = 0;
+    const line = composeLiveLine(&buf, 5, &peaks, 12, true, &cols);
+    // Escape codes carry no width: the plain and colored lines agree on cols.
+    var plain_cols: usize = 0;
+    _ = composeLiveLine(&plain_buf, 5, &peaks, 12, false, &plain_cols);
+    try std.testing.expectEqual(plain_cols, cols);
+    // Width 12: 9 cells of prefix, 3 bar columns — the 5 peaks compress to
+    // silence, yellow, red (integer-division column slices).
+    try std.testing.expectEqualStrings(
+        "\r \x1b[31m⏺\x1b[0m \x1b[1m00:05\x1b[0m \x1b[2m▁\x1b[0m\x1b[33m▅\x1b[0m\x1b[31m█\x1b[0m",
+        line,
+    );
 }

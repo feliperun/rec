@@ -3,6 +3,7 @@ const capture = @import("capture.zig");
 const library = @import("library.zig");
 const playback = @import("playback.zig");
 const record = @import("record.zig");
+const style = @import("style.zig");
 
 /// Set by the SIGINT handler while the interactive loop owns the terminal.
 var g_sigint = std.atomic.Value(bool).init(false);
@@ -94,7 +95,8 @@ pub fn runInteractive(io: std.Io, gpa: std.mem.Allocator, recordings_path: []con
         std.posix.sigaction(std.posix.SIG.INT, &old_act, null);
     }
 
-    printStdout(io, "rec: r=record  l=list  <number>+Enter=play  q=quit\n> ");
+    var banner_buf: [128]u8 = undefined;
+    printStdout(io, menuBanner(&banner_buf, style.detect(io, .stdout())));
 
     var digits: [9]u8 = undefined;
     var digits_len: usize = 0;
@@ -170,4 +172,39 @@ fn printStdout(io: std.Io, msg: []const u8) void {
 
 fn printStderr(io: std.Io, msg: []const u8) void {
     std.Io.File.writeStreamingAll(.stderr(), io, msg) catch {};
+}
+
+/// The menu banner: bold keys, dim prompt. `buf` must fit the banner.
+fn menuBanner(buf: []u8, color: bool) []const u8 {
+    var n: usize = 0;
+    appendStr(buf, &n, "rec: ");
+    style.appendStyled(buf, &n, color, style.bold, "r");
+    appendStr(buf, &n, "=record  ");
+    style.appendStyled(buf, &n, color, style.bold, "l");
+    appendStr(buf, &n, "=list  ");
+    style.appendStyled(buf, &n, color, style.bold, "<number>+Enter");
+    appendStr(buf, &n, "=play  ");
+    style.appendStyled(buf, &n, color, style.bold, "q");
+    appendStr(buf, &n, "=quit\n");
+    style.appendStyled(buf, &n, color, style.dim, "> ");
+    return buf[0..n];
+}
+
+fn appendStr(buf: []u8, n: *usize, s: []const u8) void {
+    for (s) |ch| {
+        buf[n.*] = ch;
+        n.* += 1;
+    }
+}
+
+test "menuBanner is plain without color and bolds the keys with it" {
+    var buf: [128]u8 = undefined;
+    try std.testing.expectEqualStrings(
+        "rec: r=record  l=list  <number>+Enter=play  q=quit\n> ",
+        menuBanner(&buf, false),
+    );
+    try std.testing.expectEqualStrings(
+        "rec: \x1b[1mr\x1b[0m=record  \x1b[1ml\x1b[0m=list  \x1b[1m<number>+Enter\x1b[0m=play  \x1b[1mq\x1b[0m=quit\n\x1b[2m> \x1b[0m",
+        menuBanner(&buf, true),
+    );
 }

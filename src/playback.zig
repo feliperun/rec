@@ -3,6 +3,7 @@ const library = @import("library.zig");
 const live = @import("live.zig");
 const prompts = @import("prompts.zig");
 const cut = @import("cut.zig");
+const style = @import("style.zig");
 const waveform = @import("waveform.zig");
 
 const afplay_path = "/usr/bin/afplay";
@@ -188,6 +189,8 @@ fn playInteractive(
 
     installSigint(io);
 
+    const color = style.detect(io, .stderr());
+
     const child = std.process.spawn(io, .{
         .argv = &.{ afplay_path, abs_path },
     }) catch {
@@ -239,7 +242,7 @@ fn playInteractive(
         const elapsed_ns = ref.nanoseconds - started.nanoseconds - paused_ns;
         const elapsed_sec = @as(f64, @floatFromInt(@max(elapsed_ns, 0))) / 1e9;
 
-        draw(io, state, elapsed_sec, duration_sec, peaks, mark_in, mark_out, &screen);
+        draw(io, state, elapsed_sec, duration_sec, peaks, mark_in, mark_out, &screen, color);
 
         switch (readKey(io, tick_ms)) {
             .none => {},
@@ -271,14 +274,14 @@ fn playInteractive(
                 },
                 'd', 'D' => {
                     const span = cutSpan(mark_in, mark_out, duration_sec) orelse {
-                        drawNote(io, "mark the piece with I and O first", &screen);
+                        drawNote(io, "mark the piece with I and O first", &screen, color);
                         continue :keys;
                     };
                     // A cut needs at least 0.2 s on both sides: the marked
                     // piece must be real, and it must not eat the file.
                     const removed = span[1] - span[0];
                     if (removed < 0.2 or duration_sec - removed < 0.2) {
-                        drawNote(io, "nothing to cut: marks too close or covering everything", &screen);
+                        drawNote(io, "nothing to cut: marks too close or covering everything", &screen, color);
                         continue :keys;
                     }
                     stopChild(pid, &reaped);
@@ -352,31 +355,39 @@ fn draw(
     mark_in: ?f64,
     mark_out: ?f64,
     screen: *live.Block,
+    color: bool,
 ) void {
     const width = termWidth();
     var erase_buf: [64]u8 = undefined;
     printStderr(io, screen.erase(width, &erase_buf));
 
-    var line: [512]u8 = undefined;
+    var line: [1024]u8 = undefined;
     var cols: usize = 0;
-    printStderr(io, statusLine(&line, state, elapsed_sec, duration_sec, mark_in, mark_out, &cols));
+    printStderr(io, statusLine(&line, state, elapsed_sec, duration_sec, mark_in, mark_out, color, &cols));
     screen.push(cols);
     printStderr(io, "\n");
     const sel: ?waveform.SelRange = if (cutSpan(mark_in, mark_out, duration_sec)) |s|
         .{ .start_col = playedCols(width, s[0], duration_sec), .end_col = playedCols(width, s[1], duration_sec) }
     else
         null;
-    printStderr(io, waveform.renderBar(peaks, width, playedCols(width, elapsed_sec, duration_sec), sel, &line));
+    printStderr(io, waveform.renderBar(peaks, width, playedCols(width, elapsed_sec, duration_sec), sel, color, &line));
     screen.push(width);
 }
 
 /// A transient one-line notice under the view; the next redraw erases it
 /// along with the rest of the block.
-fn drawNote(io: std.Io, msg: []const u8, screen: *live.Block) void {
+fn drawNote(io: std.Io, msg: []const u8, screen: *live.Block, color: bool) void {
     printStderr(io, "\x1b[1B\r"); // the row under the waveform
-    printStderr(io, msg);
+    printStyledStderr(io, color, style.yellow, msg);
     printStderr(io, "\x1b[K");
-    screen.push(msg.len); // notes are plain ASCII
+    screen.push(msg.len); // cells of the plain text; escapes carry no width
+}
+
+fn printStyledStderr(io: std.Io, color: bool, code: []const u8, text: []const u8) void {
+    var buf: [512]u8 = undefined;
+    var n: usize = 0;
+    style.appendStyled(&buf, &n, color, code, text);
+    printStderr(io, buf[0..n]);
 }
 
 /// How many columns of the bar the playback has covered.
@@ -399,36 +410,56 @@ fn cutSpan(mark_in: ?f64, mark_out: ?f64, duration_sec: f64) ?[2]f64 {
 }
 
 /// "▶ 00:12 / 01:30  SPACE=pause I=mark O=mark D=delete Q=stop" — the whole
-/// status line. With marks set, the resolved span is shown and R=reset
-/// replaces the I/O hints, which are already in place. `cols_out` receives
-/// the display columns (the ▶/⏸ glyph is one cell of its three bytes).
-fn statusLine(buf: []u8, state: PlayState, elapsed_sec: f64, duration_sec: f64, mark_in: ?f64, mark_out: ?f64, cols_out: *usize) []const u8 {
+/// status line: a green ▶ (yellow ⏸ when paused), bold elapsed, dim total
+/// and key hints, cyan marked span. With marks set, the resolved span is
+/// shown and R=reset replaces the I/O hints. `cols_out` receives the display
+/// columns (escapes carry no width; the ▶/⏸ glyph is one cell).
+fn statusLine(buf: []u8, state: PlayState, elapsed_sec: f64, duration_sec: f64, mark_in: ?f64, mark_out: ?f64, color: bool, cols_out: *usize) []const u8 {
     var n: usize = 0;
-    appendStr(buf, &n, if (state == .playing) "▶ " else "⏸ ");
-    appendTime(buf, &n, elapsed_sec);
-    appendStr(buf, &n, " / ");
-    appendTime(buf, &n, duration_sec);
+    var cells: usize = 0;
+    style.appendStyled(buf, &n, color, if (state == .playing) style.green else style.yellow, if (state == .playing) "▶" else "⏸");
+    cells += 1;
+    put(buf, &n, &cells, " ");
+    style.begin(buf, &n, color, style.bold);
+    cells += appendTime(buf, &n, elapsed_sec);
+    style.end(buf, &n, color);
+    style.begin(buf, &n, color, style.dim);
+    put(buf, &n, &cells, " / ");
+    cells += appendTime(buf, &n, duration_sec);
+    style.end(buf, &n, color);
     const span = cutSpan(mark_in, mark_out, duration_sec);
     if (span) |s| {
-        appendStr(buf, &n, "  [");
-        appendTime(buf, &n, s[0]);
-        appendStr(buf, &n, "–");
-        appendTime(buf, &n, s[1]);
-        appendStr(buf, &n, "]");
+        style.begin(buf, &n, color, style.cyan);
+        put(buf, &n, &cells, "  [");
+        cells += appendTime(buf, &n, s[0]);
+        appendStr(buf, &n, "–"); // en dash: three bytes, one cell
+        cells += 1;
+        cells += appendTime(buf, &n, s[1]);
+        put(buf, &n, &cells, "]");
+        style.end(buf, &n, color);
     }
-    appendStr(buf, &n, "  SPACE=");
-    appendStr(buf, &n, if (state == .playing) "pause" else "play");
+    style.begin(buf, &n, color, style.dim);
+    put(buf, &n, &cells, "  SPACE=");
+    put(buf, &n, &cells, if (state == .playing) "pause" else "play");
     if (span != null) {
-        appendStr(buf, &n, " D=delete R=reset Q=stop");
+        put(buf, &n, &cells, " D=delete R=reset Q=stop");
     } else {
-        appendStr(buf, &n, " I=mark O=mark D=delete Q=stop");
+        put(buf, &n, &cells, " I=mark O=mark D=delete Q=stop");
     }
-    cols_out.* = n - 2;
+    style.end(buf, &n, color);
+    cols_out.* = cells;
     return buf[0..n];
 }
 
+/// Appends a plain (one cell per byte) piece to the line.
+fn put(buf: []u8, n: *usize, cells: *usize, s: []const u8) void {
+    appendStr(buf, n, s);
+    cells.* += s.len;
+}
+
 /// "MM:SS", or "H:MM:SS" past an hour; negative values clamp to zero.
-fn appendTime(buf: []u8, n: *usize, sec: f64) void {
+/// Returns the number of display columns written.
+fn appendTime(buf: []u8, n: *usize, sec: f64) usize {
     const total: u64 = @intFromFloat(@max(sec + 0.5, 0.0));
     const h = total / 3600;
     const m = (total / 60) % 60;
@@ -444,6 +475,7 @@ fn appendTime(buf: []u8, n: *usize, sec: f64) void {
     buf[n.*] = ':';
     n.* += 1;
     record.append2(buf, n, s);
+    return if (h > 0) 8 else 5;
 }
 
 /// Prints the sibling transcript (`<stem>.md`) in full — frontmatter off,
@@ -507,27 +539,44 @@ test "playedCols maps elapsed time onto the bar width" {
 }
 
 test "statusLine shows state, times, marks, and keys" {
-    var buf: [128]u8 = undefined;
+    var buf: [256]u8 = undefined;
     var cols: usize = 0;
     try std.testing.expectEqualStrings(
         "▶ 00:12 / 01:30  SPACE=pause I=mark O=mark D=delete Q=stop",
-        statusLine(&buf, .playing, 12.3, 90, null, null, &cols),
+        statusLine(&buf, .playing, 12.3, 90, null, null, false, &cols),
     );
     try std.testing.expectEqual(@as(usize, 58), cols);
     try std.testing.expectEqualStrings(
         "⏸ 00:12 / 01:30  SPACE=play I=mark O=mark D=delete Q=stop",
-        statusLine(&buf, .paused, 12.3, 90, null, null, &cols),
+        statusLine(&buf, .paused, 12.3, 90, null, null, false, &cols),
     );
     // With marks, the resolved span is shown and R=reset replaces I/O.
     try std.testing.expectEqualStrings(
         "▶ 00:12 / 01:30  [00:05–00:12]  SPACE=pause D=delete R=reset Q=stop",
-        statusLine(&buf, .playing, 12.3, 90, 12.3, 5.1, &cols),
+        statusLine(&buf, .playing, 12.3, 90, 12.3, 5.1, false, &cols),
     );
     // Only one mark resolves against the recording's edges.
     try std.testing.expectEqualStrings(
         "▶ 00:12 / 01:30  [00:05–01:30]  SPACE=pause D=delete R=reset Q=stop",
-        statusLine(&buf, .playing, 12.3, 90, 5.1, null, &cols),
+        statusLine(&buf, .playing, 12.3, 90, 5.1, null, false, &cols),
     );
+}
+
+test "statusLine colors state, times, and marks without changing width" {
+    var buf: [256]u8 = undefined;
+    var cols: usize = 0;
+    try std.testing.expectEqualStrings(
+        "\x1b[32m▶\x1b[0m \x1b[1m00:12\x1b[0m\x1b[2m / 01:30\x1b[0m\x1b[2m  SPACE=pause I=mark O=mark D=delete Q=stop\x1b[0m",
+        statusLine(&buf, .playing, 12.3, 90, null, null, true, &cols),
+    );
+    try std.testing.expectEqual(@as(usize, 58), cols);
+
+    // The marked span is cyan; the ⏸ paused state is yellow.
+    try std.testing.expectEqualStrings(
+        "\x1b[33m⏸\x1b[0m \x1b[1m00:12\x1b[0m\x1b[2m / 01:30\x1b[0m\x1b[36m  [00:05–00:12]\x1b[0m\x1b[2m  SPACE=play D=delete R=reset Q=stop\x1b[0m",
+        statusLine(&buf, .paused, 12.3, 90, 12.3, 5.1, true, &cols),
+    );
+    try std.testing.expectEqual(@as(usize, 66), cols);
 }
 
 test "cutSpan normalizes the marks into the interval to cut" {
@@ -549,15 +598,15 @@ test "cutSpan normalizes the marks into the interval to cut" {
 test "appendTime formats MM:SS and H:MM:SS" {
     var buf: [32]u8 = undefined;
     var n: usize = 0;
-    appendTime(&buf, &n, 12.3);
+    try std.testing.expectEqual(@as(usize, 5), appendTime(&buf, &n, 12.3));
     try std.testing.expectEqualStrings("00:12", buf[0..n]);
 
     n = 0;
-    appendTime(&buf, &n, 3661.0);
+    try std.testing.expectEqual(@as(usize, 8), appendTime(&buf, &n, 3661.0));
     try std.testing.expectEqualStrings("1:01:01", buf[0..n]);
 
     n = 0;
-    appendTime(&buf, &n, -5);
+    _ = appendTime(&buf, &n, -5);
     try std.testing.expectEqualStrings("00:00", buf[0..n]);
 }
 

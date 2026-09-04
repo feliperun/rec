@@ -101,8 +101,9 @@ Records from the default microphone to `~/recordings/YYYYMMDD-HHMMSS.m4a`
 (AAC-LC, 48 kHz, stereo, via AudioToolbox); `~/recordings/` is created on
 demand. Without `--duration`, recording stops on Ctrl-C; with `--duration
 <sec>` it stops automatically. On a terminal, a live waveform bar shows the
-recording growing in real time. The container is always finalized — a
-failed encode leaves no partial file behind.
+recording growing in real time as a VU meter — green quiet, yellow loud, red
+peaking. The container is always finalized — a failed encode leaves no
+partial file behind.
 
 ### list
 
@@ -217,6 +218,14 @@ Running `rec` with no subcommand enters a minimal interactive menu:
 - `q` — quit
 
 Raw terminal mode is restored on exit, including after Ctrl-C.
+
+### Colors
+
+The live views (record, play), the `list` table, and the interactive menu are
+colored on a terminal: the waveform is a VU meter (green → yellow → red),
+the ⏺ recording dot is red, the ▶/⏸ playback state is green/yellow, and
+secondary text is dimmed. Piped output carries no ANSI codes, so scripts can
+keep grepping it; set `NO_COLOR` to opt out on a terminal too.
 
 ## Build from source
 

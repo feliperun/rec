@@ -1,5 +1,6 @@
 const std = @import("std");
 const m4a = @import("m4a.zig");
+const style = @import("style.zig");
 
 pub const recordings_dir = "recordings";
 
@@ -156,29 +157,48 @@ pub fn listRecordings(io: std.Io, gpa: std.mem.Allocator, recordings_path: []con
     for (entries.items) |e| name_w = @max(name_w, e.name.len);
 
     var line: [512]u8 = undefined;
-    {
-        var n: usize = 0;
-        appendStr(&line, &n, "  #  ");
-        appendStr(&line, &n, "name");
-        appendSpaces(&line, &n, name_w - "name".len);
-        appendStr(&line, &n, "  time  size\n");
-        printStdout(io, line[0..n]);
-    }
+    const color = style.detect(io, .stdout());
+    printStdout(io, appendHeader(&line, name_w, color));
 
     for (entries.items, 1..) |e, idx| {
-        var n: usize = 0;
-        appendUintPadded(&line, &n, idx, 3);
-        appendStr(&line, &n, "  ");
-        appendStr(&line, &n, e.name);
-        appendSpaces(&line, &n, name_w - e.name.len);
-        appendStr(&line, &n, "  ");
-        appendDuration(&line, &n, e.duration_sec);
-        appendStr(&line, &n, "  ");
-        appendSize(&line, &n, e.size);
-        appendStr(&line, &n, "\n");
-        printStdout(io, line[0..n]);
+        printStdout(io, appendRow(&line, e.name, e.duration_sec, e.size, idx, name_w, color));
     }
     return 0;
+}
+
+/// The `list` header row: bold column labels padded to `name_w`.
+fn appendHeader(buf: []u8, name_w: usize, color: bool) []const u8 {
+    var n: usize = 0;
+    appendStr(buf, &n, "  #  ");
+    style.appendStyled(buf, &n, color, style.bold, "name");
+    appendSpaces(buf, &n, name_w - "name".len);
+    appendStr(buf, &n, "  ");
+    style.appendStyled(buf, &n, color, style.bold, "time");
+    appendStr(buf, &n, "  ");
+    style.appendStyled(buf, &n, color, style.bold, "size");
+    appendStr(buf, &n, "\n");
+    return buf[0..n];
+}
+
+/// One `list` row: dim index, name, cyan duration, dim size.
+fn appendRow(buf: []u8, name: []const u8, duration: ?f64, size: u64, idx: usize, name_w: usize, color: bool) []const u8 {
+    var n: usize = 0;
+    style.begin(buf, &n, color, style.dim);
+    appendUintPadded(buf, &n, idx, 3);
+    style.end(buf, &n, color);
+    appendStr(buf, &n, "  ");
+    appendStr(buf, &n, name);
+    appendSpaces(buf, &n, name_w - name.len);
+    appendStr(buf, &n, "  ");
+    style.begin(buf, &n, color, style.cyan);
+    appendDuration(buf, &n, duration);
+    style.end(buf, &n, color);
+    appendStr(buf, &n, "  ");
+    style.begin(buf, &n, color, style.dim);
+    appendSize(buf, &n, size);
+    style.end(buf, &n, color);
+    appendStr(buf, &n, "\n");
+    return buf[0..n];
 }
 
 /// Duration from the chunk headers found in `data`, a prefix of a WAV file
@@ -394,6 +414,33 @@ test "rejects non-WAV and truncated prefixes" {
     // Non-PCM format.
     img[20] = 3;
     try std.testing.expectEqual(@as(?f64, null), parseDurationPrefix(&img, 44 + 4));
+}
+
+test "list table is plain without color and styled with it" {
+    var buf: [128]u8 = undefined;
+    // name_w tracks the longest name; pads keep the columns aligned either way.
+    const head = appendHeader(&buf, 19, false);
+    var row_buf: [128]u8 = undefined;
+    const row = appendRow(&row_buf, "20260826-110000.m4a", 65.0, 192000, 1, 19, false);
+    try std.testing.expectEqualStrings(
+        "  #  name" ++ (" " ** 15) ++ "  time  size\n",
+        head,
+    );
+    try std.testing.expectEqualStrings(
+        "  1  20260826-110000.m4a  01:05  187.5 KiB\n",
+        row,
+    );
+
+    const head_c = appendHeader(&buf, 19, true);
+    const row_c = appendRow(&row_buf, "20260826-110000.m4a", 65.0, 192000, 1, 19, true);
+    try std.testing.expectEqualStrings(
+        "  #  \x1b[1mname\x1b[0m" ++ (" " ** 15) ++ "  \x1b[1mtime\x1b[0m  \x1b[1msize\x1b[0m\n",
+        head_c,
+    );
+    try std.testing.expectEqualStrings(
+        "\x1b[2m  1\x1b[0m  20260826-110000.m4a  \x1b[36m01:05\x1b[0m  \x1b[2m187.5 KiB\x1b[0m\n",
+        row_c,
+    );
 }
 
 test "resolveName matches index, exact name, stripped prefix, and misses" {
