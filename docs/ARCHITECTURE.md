@@ -13,15 +13,17 @@ microphone ──miniaudio──▶ PCM frames in memory ──m4a.zig (chunked 
                                                                         │
               m4a.zig (decode, s16/48k/stereo) ◀── WAV/M4A on disk ◀────┤
                         │                                               │
-                        ├── waveform.zig (peaks, live bar) ◀── record   │
+                        ├── waveform.zig (peaks, half-block grid) ◀─────┤
+                        │        ▲ record live view · play view         │
                         │                                               │
-                        ├── playback.zig ──/usr/bin/afplay──▶ speaker   │
-                        │        │ SPACE pause · I/O mark · D cut · Q    │
+                        ├── player.zig (playhead, pause, seek) ──▶ speaker
+                        │        │                                      │
+                        ├── playback.zig ── SPACE · ←→ seek · I/O · DEL cut│
                         │        └── cut.zig (remove interval → re-enc)  │
                         │                                               │
                         └── <stem>.md transcript ── printed in full ────┤
                                                                         │
-                transcribe.zig ──/usr/bin/curl──▶ Deepgram ──▶ okf.zig ──▶ *.md
+     transcribecmd.zig ──▶ transcribe.zig ──/usr/bin/curl──▶ Deepgram ──▶ okf.zig ──▶ *.md
 ```
 
 `main.zig` parses the subcommand and dispatches; `tui.zig` wraps the same
@@ -33,13 +35,17 @@ verbs in a raw-mode interactive menu.
 |--------|----------------|
 | `src/main.zig` | Arg parsing, subcommand dispatch, exit codes |
 | `src/capture.zig` | miniaudio default-input device → growable PCM buffer |
-| `src/record.zig` | The record verb: capture loop, naming, chunked encode and atomic publication |
+| `src/record.zig` | The record verb: capture loop, SPACE pause (paused audio is dropped), ESC/Ctrl-C stop, naming, chunked encode and atomic publication |
 | `src/m4a.zig` | M4A/AAC encode via AudioToolbox's system encoder; container duration parse for `list`; `decode` back to canonical s16/48k/stereo PCM via `ExtAudioFileRead` |
 | `src/library.zig` | Scans `~/recordings/`, sorts newest-first, formats table |
-| `src/playback.zig` | Interactive play: raw-mode TUI over `/usr/bin/afplay` — live waveform, SPACE pause (SIGSTOP/SIGCONT), I/O marks, D cut, R reset marks, Q stop; prints the `<stem>.md` transcript in full; blocking fallback off a tty |
-| `src/waveform.zig` | Peak accumulation over PCM (100 ms blocks) and one-line Unicode block-bar rendering with played-column dimming and reverse-video selection; terminal width |
+| `src/player.zig` | In-process playback of decoded PCM on miniaudio's default output device: atomic playhead/paused/done, sample-accurate seek, silence-gated pause ([ADR 0010](adr/0010-play-audio-in-process.md)) |
+| `src/playback.zig` | Interactive play: raw-mode TUI over `player.zig` — one composed frame per tick (hidden cursor, sync bracket) with the waveform grid and playhead cursor, SPACE pause, ←/→ and SHIFT+←/→ seek, I/O region anchors, DELETE with ENTER confirmation cutting via `cut.zig`, R reset, T transcribe-or-open transcript, Q stop; prints the `<stem>.md` transcript in full; blocking fallback off a tty |
+| `src/waveform.zig` | Peak accumulation over PCM (100 ms blocks) and the shared multi-row half-block waveform grid — sqrt scale, VU colors, played-column dimming, reverse-video selection, full-height cursor and selection anchors ([ADR 0011](adr/0011-waveform-half-block-grid.md)) |
+| `src/keys.zig` | Raw stdin keystrokes for the live views: plain bytes, arrow keys and SHIFT+arrows parsed from escape sequences, Delete (backspace and `ESC[3~`) |
+| `src/live.zig` | Alternate-screen vocabulary for the live views: enter/leave (hardware cursor hidden while a view is up), synchronized-update brackets, absolute cursor positioning, line erase, row-wrap math ([ADR 0009](adr/0009-alternate-screen-live-views.md)) |
 | `src/cut.zig` | Removes a marked time interval in place: decode (or read WAV) → frame-aligned slice → re-encode the remainder → replace the original |
 | `src/transcribe.zig` | Spawns `/usr/bin/curl` against Deepgram pre-recorded API |
+| `src/transcribecmd.zig` | The transcribe verb: resolve the selection, send the recording to Deepgram, render the OKF markdown, and run the LLM refine pass (shared by the CLI and the play view's `T`) |
 | `src/okf.zig` | Renders the OKF markdown transcript (frontmatter + prose) |
 | `src/tui.zig` | Raw-mode interactive menu; restores terminal on every exit path |
 | `src/miniaudio.c` + `vendor/miniaudio.h` | Vendored single-file audio I/O |

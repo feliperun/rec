@@ -8,7 +8,7 @@
 
 | Layer | Modules | Single responsibility |
 |-------|---------|----------------------|
-| Transport / OS boundary | `capture.zig`, `playback.zig`, `transcribe.zig` | Wrap one external producer/consumer (audio device, system player, HTTP) |
+| Transport / OS boundary | `capture.zig`, `player.zig`, `transcribe.zig` | Wrap one external producer/consumer (input device, output device, HTTP) |
 | Format | `wav.zig`, `okf.zig` | Encode/decode one on-disk format each; no policy |
 | Domain | `library.zig` | The recordings collection: scan, sort, resolve `index|filename` selections |
 | Presentation | `main.zig`, `tui.zig` | CLI surface and interactive menu over the same verbs |
@@ -18,7 +18,7 @@
 | System | Boundary |
 |--------|----------|
 | Microphone (CoreAudio via miniaudio) | `capture.zig` |
-| Speaker (`/usr/bin/afplay`) | `playback.zig` |
+| Speaker (CoreAudio via miniaudio) | `player.zig` |
 | Deepgram pre-recorded API (`/usr/bin/curl`) | `transcribe.zig` |
 | Filesystem (`~/recordings/`) | `library.zig` |
 

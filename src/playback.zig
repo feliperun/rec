@@ -1,31 +1,42 @@
 const std = @import("std");
-const library = @import("library.zig");
-const prompts = @import("prompts.zig");
 const cut = @import("cut.zig");
+const keys = @import("keys.zig");
+const library = @import("library.zig");
+const llm = @import("llm.zig");
+const live = @import("live.zig");
+const player_mod = @import("player.zig");
+const prompts = @import("prompts.zig");
+const style = @import("style.zig");
+const transcribecmd = @import("transcribecmd.zig");
 const waveform = @import("waveform.zig");
 
-const afplay_path = "/usr/bin/afplay";
-
-/// Pid of the running afplay, published for the SIGINT handler (atomic
-/// load/store and kill() are async-signal-safe).
-var g_child_pid = std.atomic.Value(std.posix.pid_t).init(-1);
+/// Set by the SIGINT handler while the interactive loop owns the terminal.
 var g_interrupted = std.atomic.Value(bool).init(false);
 
 fn onSigint(sig: std.posix.SIG) callconv(.c) void {
     _ = sig;
     g_interrupted.store(true, .release);
-    const pid = g_child_pid.load(.acquire);
-    if (pid > 0) std.posix.kill(pid, .INT) catch {};
+}
+
+fn installSigint() void {
+    const act = std.posix.Sigaction{
+        .handler = .{ .handler = onSigint },
+        .mask = std.posix.sigemptyset(),
+        .flags = 0,
+    };
+    std.posix.sigaction(std.posix.SIG.INT, &act, null);
 }
 
 /// `play <index|filename>`: resolves the selection against the library and
-/// plays it through the system player. On a terminal, the playback is a
-/// two-line live view — status plus waveform with the played part bright —
-/// driven by keys: SPACE pauses/resumes (SIGSTOP/SIGCONT on afplay), I and O
-/// mark the piece to cut at the current position (shown reversed on the
-/// bar), D cuts it out and replaces the recording, R clears the marks, Q or
-/// Ctrl-C stops. Without a terminal it plays to completion under Ctrl-C, as
-/// before.
+/// plays it in-process on the default output device — the same decoded PCM
+/// the waveform is drawn from. On a terminal, playback is a live view on
+/// the alternate screen — the multi-row waveform with the playhead over it
+/// — driven by keys: SPACE pauses/resumes, ←/→ seek one second (SHIFT for
+/// five), I and O anchor the two cursors of the region to cut (drawn as
+/// full-height columns with the span reversed), DELETE asks and ENTER
+/// confirms the cut, T transcribes the recording or opens its transcript,
+/// R clears the marks, Q or Ctrl-C stops. Without a terminal it plays to
+/// completion under Ctrl-C.
 pub fn playSelection(io: std.Io, gpa: std.mem.Allocator, selection: []const u8, recordings_path: []const u8) u8 {
     var entries: std.ArrayList(library.Entry) = .empty;
     defer library.freeEntries(gpa, &entries);
@@ -58,7 +69,7 @@ pub fn playSelection(io: std.Io, gpa: std.mem.Allocator, selection: []const u8, 
         return 1;
     };
 
-    // afplay gets an absolute path so it never depends on our cwd.
+    // An absolute path so the decode and any later cut never depend on cwd.
     var abs_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const abs_len = std.Io.Dir.cwd().realPathFile(io, recording_path, &abs_buf) catch {
         printStderr(io, "play: cannot resolve recordings/");
@@ -66,29 +77,22 @@ pub fn playSelection(io: std.Io, gpa: std.mem.Allocator, selection: []const u8, 
         printStderr(io, "\n");
         return 1;
     };
-    const abs_path = abs_buf[0..abs_len];
 
     // A transcribed recording shows its transcript in full above the player.
     printTranscript(io, gpa, recordings_path, name);
 
-    // The waveform is drawn from decoded PCM; failing to decode must not
-    // cost the user the playback, so it degrades to a flat bar.
-    var peaks: std.ArrayList(waveform.Peak) = .empty;
-    defer peaks.deinit(gpa);
-    var duration_sec: f64 = 0;
-    if (cut.loadPcm(gpa, abs_path)) |*audio| {
-        var a = audio.*;
-        defer a.deinit(gpa);
-        duration_sec = @as(f64, @floatFromInt(a.pcm.len)) / @as(f64, @floatFromInt(a.byteRate()));
-        var tracker = waveform.PeakTracker.init(gpa, peakBlockBytes(a.byteRate()));
-        defer tracker.deinit();
-        tracker.feed(a.pcm);
-        peaks.appendSlice(gpa, tracker.peaks.items) catch {};
-    } else |_| {
-        for (entries.items) |e| {
-            if (std.mem.eql(u8, e.name, name)) duration_sec = e.duration_sec orelse 0;
-        }
-    }
+    // One decode serves both the waveform and the audio: without it there
+    // is nothing to draw and nothing to play. The interactive view owns the
+    // load from here on — a confirmed cut rewrites the file and reloads it.
+    var audio = cut.loadPcm(gpa, abs_buf[0..abs_len]) catch {
+        printStderr(io, "play: cannot decode ");
+        printStderr(io, name);
+        printStderr(io, "\n");
+        return 1;
+    };
+    defer audio.deinit(gpa);
+
+    const duration_sec = @as(f64, @floatFromInt(audio.pcm.len)) / @as(f64, @floatFromInt(audio.byteRate()));
 
     const is_tty = blk: {
         const stdin_tty = std.Io.File.stdin().isTty(io) catch false;
@@ -97,47 +101,35 @@ pub fn playSelection(io: std.Io, gpa: std.mem.Allocator, selection: []const u8, 
     };
 
     if (is_tty) {
-        return playInteractive(io, gpa, abs_path, name, peaks.items, duration_sec);
+        return playInteractive(io, gpa, abs_buf[0..abs_len], &audio, name, duration_sec, recordings_path);
     }
 
     printStderr(io, "Playing ");
     printStderr(io, name);
     printStderr(io, " (Ctrl-C to stop)\n");
-    return playBlocking(io, abs_path);
+    return playBlocking(io, audio.pcm, audio.sample_rate, audio.channels);
 }
 
-/// Decodes, plays, and waits — the non-interactive path. The caller prints
-/// the messages. Returns afplay's exit code (130 on Ctrl-C).
-fn playBlocking(io: std.Io, abs_path: []const u8) u8 {
-    installSigint(io);
+/// Plays to completion — the non-interactive path. The caller prints the
+/// messages. Returns 0, or 130 on Ctrl-C.
+fn playBlocking(io: std.Io, pcm: []const u8, sample_rate: u32, channels: u32) u8 {
+    installSigint();
 
-    var child = std.process.spawn(io, .{
-        .argv = &.{ afplay_path, abs_path },
-    }) catch {
-        printStderr(io, "play: cannot spawn ");
-        printStderr(io, afplay_path);
-        printStderr(io, "\n");
+    var p = player_mod.Player{};
+    p.start(pcm, sample_rate, @intCast(channels)) catch {
+        printStderr(io, "play: cannot open the audio output device\n");
         return 1;
     };
-    if (child.id) |pid| g_child_pid.store(pid, .release);
-    defer g_child_pid.store(-1, .release);
+    defer p.deinit();
 
-    const term = child.wait(io) catch {
-        child.kill(io);
-        printStderr(io, "play: failed waiting for afplay\n");
-        return 1;
-    };
-
+    while (!p.isDone() and !g_interrupted.load(.acquire)) {
+        io.sleep(.fromMilliseconds(50), .awake) catch {};
+    }
     if (g_interrupted.load(.acquire)) {
         printStderr(io, "play: interrupted\n");
         return 130; // 128 + SIGINT
     }
-
-    return switch (term) {
-        .exited => |code| code,
-        .signal => |sig| @intCast(@min(@as(u32, 128) + @as(u32, @intCast(@intFromEnum(sig))), 255)),
-        .stopped, .unknown => 1,
-    };
+    return 0;
 }
 
 // --- interactive playback ----------------------------------------------------
@@ -146,29 +138,36 @@ fn playBlocking(io: std.Io, abs_path: []const u8) u8 {
 /// to keep the terminal quiet.
 const tick_ms = 100;
 
-const peakBlockBytes = waveform.peakBlockBytes;
+/// Seek steps: the arrows move the playhead by one second, SHIFT+arrows by
+/// five.
+const seek_step_sec: f64 = 1.0;
+const seek_step_shift_sec: f64 = 5.0;
 
 const PlayState = enum { playing, paused };
 
-/// Runs the two-line live view over afplay: the waveform (played part
-/// bright, rest dim, marked span reversed) and a status line, redrawn each
-/// tick. Keys: SPACE pause/resume, I/O mark the cut span, D cuts it out,
-/// R clears the marks, Q/Ctrl-C stop. Restores the terminal on every exit
-/// path.
+/// Runs the live view while the player plays: the status line, the
+/// multi-row waveform (played part bright, rest dim, the marked region
+/// reversed between its two anchor cursors, playhead over everything), a
+/// notes row, and the key hints — one composed frame per tick. Owns
+/// `audio`: a confirmed cut rewrites the file, reloads it, and playback
+/// continues on the new PCM with the view still up. Restores the terminal
+/// on every exit path.
 fn playInteractive(
     io: std.Io,
     gpa: std.mem.Allocator,
     abs_path: []const u8,
+    audio: *cut.Loaded,
     name: []const u8,
-    peaks: []const waveform.Peak,
-    duration_sec: f64,
+    duration_sec_in: f64,
+    recordings_path: []const u8,
 ) u8 {
+    var duration_sec = duration_sec_in;
     const cooked = std.posix.tcgetattr(0) catch {
         // Raw mode is unavailable (odd terminal); degrade to plain playback.
         printStderr(io, "Playing ");
         printStderr(io, name);
         printStderr(io, " (Ctrl-C to stop)\n");
-        return playBlocking(io, abs_path);
+        return playBlocking(io, audio.pcm, audio.sample_rate, audio.channels);
     };
 
     var raw = cooked;
@@ -185,107 +184,149 @@ fn playInteractive(
     };
     defer std.posix.tcsetattr(0, .FLUSH, cooked) catch {};
 
-    installSigint(io);
+    installSigint();
 
-    const child = std.process.spawn(io, .{
-        .argv = &.{ afplay_path, abs_path },
-    }) catch {
-        printStderr(io, "play: cannot spawn ");
-        printStderr(io, afplay_path);
-        printStderr(io, "\n");
+    const color = style.detect(io, .stderr());
+
+    // The live view owns the alternate screen; messages printed while it is
+    // up would be wiped by the leave, so every exit path restores the normal
+    // screen before printing.
+    var esc_buf: [32]u8 = undefined; // enter/leave fit; check live.enter if you grow them
+    var alt_on = std.Io.File.stderr().isTty(io) catch false;
+    if (alt_on) printStderr(io, live.enter(&esc_buf));
+    const leaveAlt = struct {
+        fn f(io_: std.Io, on: *bool, buf: []u8) void {
+            if (!on.*) return;
+            printStderr(io_, live.leave(buf));
+            on.* = false;
+        }
+    }.f;
+
+    var p = player_mod.Player{};
+    defer p.deinit();
+    p.start(audio.pcm, audio.sample_rate, @intCast(audio.channels)) catch {
+        leaveAlt(io, &alt_on, &esc_buf);
+        printStderr(io, "play: cannot open the audio output device\n");
         return 1;
     };
-    const pid: std.posix.pid_t = child.id orelse {
-        printStderr(io, "play: cannot spawn ");
-        printStderr(io, afplay_path);
-        printStderr(io, "\n");
-        return 1;
-    };
-    g_child_pid.store(pid, .release);
-    defer g_child_pid.store(-1, .release);
 
-    const started = std.Io.Timestamp.now(io, .awake);
+    // Peaks come from the same PCM the speaker plays, so a reload after a
+    // cut redraws the view from the new body.
+    var tracker = waveform.PeakTracker.init(gpa, waveform.peakBlockBytes(audio.byteRate()));
+    defer tracker.deinit();
+    tracker.feed(audio.pcm);
+    var peak_view: std.ArrayList(waveform.Peak) = .empty;
+    defer peak_view.deinit(gpa);
+    peak_view.appendSlice(gpa, tracker.peaks.items) catch {};
+
+    // The whole view is composed here and written in one shot per tick —
+    // many small writes are what made the cursor's movement flicker.
+    var frame: std.ArrayList(u8) = .empty;
+    defer frame.deinit(gpa);
+
     var state: PlayState = .playing;
-    var paused_ns: i128 = 0;
-    var pause_started = started;
-    var first_draw = true;
     var exit_code: u8 = 0;
-    var reaped = false;
-    // The piece to cut, anchored at the positions where I and O were
+    // The region to cut, anchored at the positions where I and O were
     // pressed; null until marked. Either mark alone resolves against the
     // recording's edges (O cuts the head, I the tail).
     var mark_in: ?f64 = null;
     var mark_out: ?f64 = null;
+    // The region DELETE is waiting on: the next key either confirms it
+    // (ENTER cuts) or cancels it. While it pends, the notes row shows why.
+    var confirming: ?[2]f64 = null;
+    // A notice shown on the notes row until the next keypress — the
+    // delete prompt or a transient "can't do that" message.
+    var note_buf: [128]u8 = undefined;
+    var note: ?[]const u8 = null;
 
     keys: while (true) {
-        // Natural end: reap without blocking and leave the view.
-        if (!reaped) {
-            var status: c_int = 0;
-            if (std.c.waitpid(pid, &status, std.posix.W.NOHANG) == pid) {
-                reaped = true;
-                break :keys;
-            }
-        }
+        if (p.isDone()) break :keys;
         if (g_interrupted.load(.acquire)) {
             exit_code = 130;
             break :keys;
         }
 
-        // Elapsed playing time: the wall clock minus whatever was spent
-        // paused (the reference freezes at pause_started while paused).
-        const now = std.Io.Timestamp.now(io, .awake);
-        const ref = if (state == .paused) pause_started else now;
-        const elapsed_ns = ref.nanoseconds - started.nanoseconds - paused_ns;
-        const elapsed_sec = @as(f64, @floatFromInt(@max(elapsed_ns, 0))) / 1e9;
+        draw(io, gpa, &frame, state, p.positionSec(), duration_sec, peak_view.items, mark_in, mark_out, note, color);
 
-        draw(io, state, elapsed_sec, duration_sec, peaks, mark_in, mark_out, &first_draw);
+        const key = keys.readKey(tick_ms);
+        if (key == .none) continue :keys; // no key: the notice stays up
+        note = null;
 
-        switch (readKey(io, tick_ms)) {
-            .none => {},
+        // A pending delete resolves on the very next key: ENTER cuts,
+        // anything else — a second DELETE, the arrows, SPACE — cancels.
+        // Ctrl-C still quits outright.
+        if (confirming) |span| {
+            confirming = null;
+            const pressed: ?u8 = if (key == .byte) key.byte else null;
+            if (pressed == '\r' or pressed == '\n') {
+                // Cut in place and keep playing: the playhead maps through
+                // the cut, the new file replaces the old, and the view
+                // stays up — the note plus the shrunken waveform report it.
+                const pos = p.positionSec();
+                cut.cutIntervalFile(io, gpa, abs_path, span[0], span[1]) catch |err| {
+                    note = std.fmt.bufPrint(&note_buf, "cut failed ({s}); still playing", .{@errorName(err)}) catch "cut failed; still playing";
+                    continue :keys; // the recording is untouched
+                };
+                p.stop();
+                p.deinit();
+                audio.deinit(gpa);
+                audio.* = cut.loadPcm(gpa, abs_path) catch {
+                    leaveAlt(io, &alt_on, &esc_buf);
+                    printStderr(io, "play: cannot reload after the cut\n");
+                    exit_code = 1;
+                    break :keys;
+                };
+                tracker.deinit();
+                tracker = waveform.PeakTracker.init(gpa, waveform.peakBlockBytes(audio.byteRate()));
+                tracker.feed(audio.pcm);
+                peak_view.clearRetainingCapacity();
+                peak_view.appendSlice(gpa, tracker.peaks.items) catch {};
+                duration_sec = @as(f64, @floatFromInt(audio.pcm.len)) / @as(f64, @floatFromInt(audio.byteRate()));
+                p.start(audio.pcm, audio.sample_rate, @intCast(audio.channels)) catch {
+                    leaveAlt(io, &alt_on, &esc_buf);
+                    printStderr(io, "play: cannot open the audio output device\n");
+                    exit_code = 1;
+                    break :keys;
+                };
+                p.seekSec(mapPosition(pos, span));
+                if (state == .paused) p.setPaused(true);
+                mark_in = null;
+                mark_out = null;
+                note = cutNote(&note_buf, span);
+                continue :keys;
+            }
+            if (pressed == 0x03) {
+                exit_code = 130;
+                break :keys;
+            }
+            continue :keys;
+        }
+
+        switch (key) {
             .eof => break :keys,
-            .key => |c| switch (c) {
+            .byte => |c| switch (c) {
                 ' ' => {
-                    if (state == .playing) {
-                        pause_started = std.Io.Timestamp.now(io, .awake);
-                        if (std.posix.kill(pid, .STOP)) |_| {} else |_| {}
-                        state = .paused;
-                    } else {
-                        const resumed = std.Io.Timestamp.now(io, .awake);
-                        paused_ns += resumed.nanoseconds - pause_started.nanoseconds;
-                        if (std.posix.kill(pid, .CONT)) |_| {} else |_| {}
-                        state = .playing;
-                    }
+                    state = if (state == .playing) .paused else .playing;
+                    p.setPaused(state == .paused);
                 },
                 'i', 'I' => {
-                    // Marks anchor at the current position; pressing the
-                    // same key again moves the mark.
-                    mark_in = elapsed_sec;
+                    // The anchors sit at the current position; pressing the
+                    // same key again moves that cursor.
+                    mark_in = p.positionSec();
                 },
                 'o', 'O' => {
-                    mark_out = elapsed_sec;
+                    mark_out = p.positionSec();
                 },
                 'r', 'R' => {
                     mark_in = null;
                     mark_out = null;
                 },
-                'd', 'D' => {
-                    const span = cutSpan(mark_in, mark_out, duration_sec) orelse {
-                        drawNote(io, "mark the piece with I and O first", &first_draw);
-                        continue :keys;
-                    };
-                    // A cut needs at least 0.2 s on both sides: the marked
-                    // piece must be real, and it must not eat the file.
-                    const removed = span[1] - span[0];
-                    if (removed < 0.2 or duration_sec - removed < 0.2) {
-                        drawNote(io, "nothing to cut: marks too close or covering everything", &first_draw);
-                        continue :keys;
-                    }
-                    stopChild(pid, &reaped);
-                    cut.cutIntervalFile(io, gpa, abs_path, span[0], span[1]) catch |err| {
-                        printStderr(io, "play: cannot cut (");
-                        printStderr(io, @errorName(err));
-                        printStderr(io, ")\n");
-                    };
+                't', 'T' => {
+                    // Transcribing (or editing the transcript) takes the
+                    // normal screen and a stopped player.
+                    leaveAlt(io, &alt_on, &esc_buf);
+                    p.stop();
+                    exit_code = openTranscript(io, gpa, name, recordings_path);
                     break :keys;
                 },
                 'q' => break :keys,
@@ -295,86 +336,152 @@ fn playInteractive(
                 },
                 else => {},
             },
+            .delete => {
+                const span = cutSpan(mark_in, mark_out, duration_sec) orelse {
+                    note = "mark the region with I and O first";
+                    continue :keys;
+                };
+                // A cut needs at least 0.2 s on both sides: the marked
+                // region must be real, and it must not eat the file.
+                const removed = span[1] - span[0];
+                if (removed < 0.2 or duration_sec - removed < 0.2) {
+                    note = "nothing to cut: region too short or covering everything";
+                    continue :keys;
+                }
+                confirming = span;
+                note = confirmNote(&note_buf, span);
+            },
+            .left => p.seekBy(-seek_step_sec),
+            .right => p.seekBy(seek_step_sec),
+            .shift_left => p.seekBy(-seek_step_shift_sec),
+            .shift_right => p.seekBy(seek_step_shift_sec),
+            .none => unreachable,
         }
     }
 
-    if (!reaped) stopChild(pid, &reaped);
+    p.stop();
+    leaveAlt(io, &alt_on, &esc_buf);
     printStderr(io, "\n");
     return exit_code;
 }
 
-/// Kills and reaps the child, ignoring an already-dead pid (ESRCH).
-fn stopChild(pid: std.posix.pid_t, reaped: *bool) void {
-    std.posix.kill(pid, .TERM) catch {};
-    var status: c_int = 0;
-    _ = std.c.waitpid(pid, &status, 0);
-    reaped.* = true;
-}
-
-const Key = union(enum) {
-    none,
-    key: u8,
-    eof,
-};
-
-/// Waits up to `ms` for a keystroke; the poll window is what paces the UI.
-fn readKey(io: std.Io, ms: i32) Key {
-    _ = io;
-    var fds = [_]std.posix.pollfd{.{
-        .fd = 0,
-        .events = std.posix.POLL.IN,
-        .revents = undefined,
-    }};
-    const ready = std.posix.poll(&fds, ms) catch return .none;
-    if (ready == 0) return .none;
-    var buf: [1]u8 = undefined;
-    const n = std.posix.read(0, &buf) catch return .none;
-    if (n == 0) return .eof;
-    return .{ .key = buf[0] };
-}
-
 // --- the live view -----------------------------------------------------------
 
-fn termWidth() usize {
-    return waveform.termWidth();
-}
-
-/// Draws the two-line view: on the first draw the lines are printed, after
-/// that the cursor climbs back one line and both are rewritten in place.
+/// Composes the whole view — the status line, the waveform grid (the
+/// playhead over it, the marked region reversed between its two anchor
+/// cursors), a notes row, and the key hints — into `frame` behind a
+/// synchronized-update bracket and writes it once. One write per tick with
+/// the hardware cursor hidden is what keeps the view from flickering while
+/// the playhead moves; the absolute positioning also overwrites whatever a
+/// resize did to the grid.
 fn draw(
     io: std.Io,
+    gpa: std.mem.Allocator,
+    frame: *std.ArrayList(u8),
     state: PlayState,
     elapsed_sec: f64,
     duration_sec: f64,
     peaks: []const waveform.Peak,
     mark_in: ?f64,
     mark_out: ?f64,
-    first_draw: *bool,
+    note: ?[]const u8,
+    color: bool,
 ) void {
-    const width = termWidth();
-    var line: [512]u8 = undefined;
+    const width = @min(waveform.termWidth(), waveform.max_columns);
+    var esc: [16]u8 = undefined;
+    var line: [waveform.rowBufferLen(waveform.max_columns)]u8 = undefined;
 
-    if (!first_draw.*) printStderr(io, "\x1b[1A\r");
-    printStderr(io, statusLine(&line, state, elapsed_sec, duration_sec, mark_in, mark_out));
-    printStderr(io, "\x1b[K\n");
+    var fractions: [waveform.max_columns]u8 = undefined;
+    const fr = waveform.columnFractions(peaks, fractions[0..width]);
+
+    const cursor = @min(playedCols(width, elapsed_sec, duration_sec), width -| 1);
+    const has_marks = cutSpan(mark_in, mark_out, duration_sec) != null;
     const sel: ?waveform.SelRange = if (cutSpan(mark_in, mark_out, duration_sec)) |s|
         .{ .start_col = playedCols(width, s[0], duration_sec), .end_col = playedCols(width, s[1], duration_sec) }
     else
         null;
-    printStderr(io, waveform.renderBar(peaks, width, playedCols(width, elapsed_sec, duration_sec), sel, &line));
-    printStderr(io, "\x1b[K");
-    first_draw.* = false;
+    // The two anchors, drawn as full-height columns at the marked positions
+    // — the region's start and end cursors. A lone mark resolves against
+    // the recording's edges, like the cut itself does.
+    const edges: ?waveform.SelRange = if (mark_in == null and mark_out == null)
+        null
+    else
+        .{
+            .start_col = playedCols(width, mark_in orelse 0, duration_sec),
+            .end_col = playedCols(width, mark_out orelse duration_sec, duration_sec),
+        };
+
+    frame.clearRetainingCapacity();
+    frame.appendSlice(gpa, live.sync_begin) catch return;
+    frame.appendSlice(gpa, live.moveTo(&esc, 1, 1)) catch return;
+    frame.appendSlice(gpa, live.clearLine(&esc)) catch return;
+    frame.appendSlice(gpa, statusLine(&line, state, elapsed_sec, duration_sec, mark_in, mark_out, color)) catch return;
+
+    var row: usize = 0;
+    while (row < waveform.view_height) : (row += 1) {
+        frame.appendSlice(gpa, live.moveTo(&esc, 2 + row, 1)) catch return;
+        frame.appendSlice(gpa, live.clearLine(&esc)) catch return;
+        frame.appendSlice(gpa, waveform.renderRow(fr, waveform.view_height, row, .{
+            .played_cols = cursor,
+            .cursor_col = cursor,
+            .sel = sel,
+            .sel_edges = edges,
+            .color = color,
+        }, &line)) catch return;
+    }
+
+    // The notes row: the pending-delete prompt or a transient notice.
+    frame.appendSlice(gpa, live.moveTo(&esc, 2 + waveform.view_height, 1)) catch return;
+    frame.appendSlice(gpa, live.clearLine(&esc)) catch return;
+    if (note) |msg| {
+        var styled: [192]u8 = undefined;
+        var n: usize = 0;
+        style.appendStyled(&styled, &n, color, style.yellow, msg);
+        frame.appendSlice(gpa, styled[0..n]) catch return;
+    }
+
+    // The key legend, one dim row under the grid.
+    frame.appendSlice(gpa, live.moveTo(&esc, 3 + waveform.view_height, 1)) catch return;
+    frame.appendSlice(gpa, live.clearLine(&esc)) catch return;
+    frame.appendSlice(gpa, hintsLine(&line, has_marks, state == .paused, color)) catch return;
+
+    frame.appendSlice(gpa, live.sync_end) catch return;
+    printStderr(io, frame.items);
 }
 
-/// A transient one-line notice under the view; the next redraw covers it.
-fn drawNote(io: std.Io, msg: []const u8, first_draw: *bool) void {
-    if (!first_draw.*) printStderr(io, "\x1b[1B\r"); // back onto the status line
-    printStderr(io, msg);
-    printStderr(io, "\x1b[K\r");
-    first_draw.* = true; // the next draw reprints both lines in place
+/// "delete 00:05–00:12? ENTER deletes, anything else cancels" — the note
+/// shown while a DELETE is pending confirmation.
+fn confirmNote(buf: []u8, span: [2]f64) []const u8 {
+    var n: usize = 0;
+    appendStr(buf, &n, "delete ");
+    _ = appendTime(buf, &n, span[0]);
+    appendStr(buf, &n, "–");
+    _ = appendTime(buf, &n, span[1]);
+    appendStr(buf, &n, "? ENTER deletes, anything else cancels");
+    return buf[0..n];
 }
 
-/// How many columns of the bar the playback has covered.
+/// "cut 00:05–00:12" — the success note shown on the notes row after the
+/// file is rewritten; the waveform shrinking beside it is the visual proof.
+fn cutNote(buf: []u8, span: [2]f64) []const u8 {
+    var n: usize = 0;
+    appendStr(buf, &n, "cut ");
+    _ = appendTime(buf, &n, span[0]);
+    appendStr(buf, &n, "–");
+    _ = appendTime(buf, &n, span[1]);
+    return buf[0..n];
+}
+
+/// Where the playhead lands once the span is removed: before the span it
+/// stays put, inside it jumps to the span's start, past it shifts back by
+/// the removed length.
+fn mapPosition(pos: f64, span: [2]f64) f64 {
+    if (pos < span[0]) return pos;
+    if (pos < span[1]) return span[0];
+    return pos - (span[1] - span[0]);
+}
+
+/// How many columns of the grid the playback has covered.
 fn playedCols(width: usize, elapsed_sec: f64, duration_sec: f64) usize {
     if (duration_sec <= 0) return 0;
     const frac = @min(@max(elapsed_sec / duration_sec, 0.0), 1.0);
@@ -393,35 +500,50 @@ fn cutSpan(mark_in: ?f64, mark_out: ?f64, duration_sec: f64) ?[2]f64 {
     return .{ @min(start, end), @max(start, end) };
 }
 
-/// "▶ 00:12 / 01:30  SPACE=pause I=mark O=mark D=delete Q=stop" — the whole
-/// status line. With marks set, the resolved span is shown and R=reset
-/// replaces the I/O hints, which are already in place.
-fn statusLine(buf: []u8, state: PlayState, elapsed_sec: f64, duration_sec: f64, mark_in: ?f64, mark_out: ?f64) []const u8 {
+/// "▶ 00:12 / 01:30" — a green ▶ (yellow ⏸ when paused), bold elapsed, dim
+/// total; with marks set, the resolved span in cyan. The key legend lives
+/// in hintsLine, one row under the grid.
+fn statusLine(buf: []u8, state: PlayState, elapsed_sec: f64, duration_sec: f64, mark_in: ?f64, mark_out: ?f64, color: bool) []const u8 {
     var n: usize = 0;
-    appendStr(buf, &n, if (state == .playing) "▶ " else "⏸ ");
-    appendTime(buf, &n, elapsed_sec);
+    style.appendStyled(buf, &n, color, if (state == .playing) style.green else style.yellow, if (state == .playing) "▶" else "⏸");
+    appendStr(buf, &n, " ");
+    style.begin(buf, &n, color, style.bold);
+    _ = appendTime(buf, &n, elapsed_sec);
+    style.end(buf, &n, color);
+    style.begin(buf, &n, color, style.dim);
     appendStr(buf, &n, " / ");
-    appendTime(buf, &n, duration_sec);
-    const span = cutSpan(mark_in, mark_out, duration_sec);
-    if (span) |s| {
+    _ = appendTime(buf, &n, duration_sec);
+    style.end(buf, &n, color);
+    if (cutSpan(mark_in, mark_out, duration_sec)) |s| {
+        style.begin(buf, &n, color, style.cyan);
         appendStr(buf, &n, "  [");
-        appendTime(buf, &n, s[0]);
-        appendStr(buf, &n, "–");
-        appendTime(buf, &n, s[1]);
+        _ = appendTime(buf, &n, s[0]);
+        appendStr(buf, &n, "–"); // en dash: three bytes, one cell
+        _ = appendTime(buf, &n, s[1]);
         appendStr(buf, &n, "]");
-    }
-    appendStr(buf, &n, "  SPACE=");
-    appendStr(buf, &n, if (state == .playing) "pause" else "play");
-    if (span != null) {
-        appendStr(buf, &n, " D=delete R=reset Q=stop");
-    } else {
-        appendStr(buf, &n, " I=mark O=mark D=delete Q=stop");
+        style.end(buf, &n, color);
     }
     return buf[0..n];
 }
 
+/// The dim key legend under the grid. With marks set, the I/O hints give
+/// way to R=reset; SPACE names what the next press does.
+fn hintsLine(buf: []u8, has_marks: bool, paused: bool, color: bool) []const u8 {
+    var n: usize = 0;
+    style.begin(buf, &n, color, style.dim);
+    appendStr(buf, &n, if (paused) "SPACE=play " else "SPACE=pause ");
+    if (has_marks) {
+        appendStr(buf, &n, "←→=1s SHIFT+←→=5s DEL=delete R=reset T=transcribe Q=stop");
+    } else {
+        appendStr(buf, &n, "←→=1s SHIFT+←→=5s I=in O=out DEL=delete T=transcribe Q=stop");
+    }
+    style.end(buf, &n, color);
+    return buf[0..n];
+}
+
 /// "MM:SS", or "H:MM:SS" past an hour; negative values clamp to zero.
-fn appendTime(buf: []u8, n: *usize, sec: f64) void {
+/// Returns the number of display columns written.
+fn appendTime(buf: []u8, n: *usize, sec: f64) usize {
     const total: u64 = @intFromFloat(@max(sec + 0.5, 0.0));
     const h = total / 3600;
     const m = (total / 60) % 60;
@@ -437,23 +559,14 @@ fn appendTime(buf: []u8, n: *usize, sec: f64) void {
     buf[n.*] = ':';
     n.* += 1;
     record.append2(buf, n, s);
+    return if (h > 0) 8 else 5;
 }
 
 /// Prints the sibling transcript (`<stem>.md`) in full — frontmatter off,
 /// prose verbatim — above the player. No file or empty body: silent.
 fn printTranscript(io: std.Io, gpa: std.mem.Allocator, recordings_path: []const u8, name: []const u8) void {
-    var stem_buf: [64]u8 = undefined;
-    const stem = library.stripExt(name);
-    if (stem.len > stem_buf.len) return;
-    @memcpy(stem_buf[0..stem.len], stem);
-
-    var md_name_buf: [80]u8 = undefined;
-    var md_len: usize = 0;
-    record.appendStr(&md_name_buf, &md_len, stem);
-    record.appendStr(&md_name_buf, &md_len, ".md");
-
     var md_path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const md_path = library.recordingPath(recordings_path, md_name_buf[0..md_len], &md_path_buf) orelse return;
+    const md_path = transcriptPath(recordings_path, name, &md_path_buf) orelse return;
 
     const doc = std.Io.Dir.cwd().readFileAlloc(io, md_path, gpa, .limited(16 * 1024 * 1024)) catch return;
     defer gpa.free(doc);
@@ -465,14 +578,72 @@ fn printTranscript(io: std.Io, gpa: std.mem.Allocator, recordings_path: []const 
     printStderr(io, "\n");
 }
 
-fn installSigint(io: std.Io) void {
-    _ = io;
-    const act = std.posix.Sigaction{
-        .handler = .{ .handler = onSigint },
-        .mask = std.posix.sigemptyset(),
-        .flags = 0,
+/// The sibling transcript path (`<stem>.md`), or null when the name does
+/// not fit the buffers.
+fn transcriptPath(recordings_path: []const u8, name: []const u8, buf: []u8) ?[]const u8 {
+    var md_name_buf: [80]u8 = undefined;
+    var md_len: usize = 0;
+    record.appendStr(&md_name_buf, &md_len, library.stripExt(name));
+    record.appendStr(&md_name_buf, &md_len, ".md");
+    return library.recordingPath(recordings_path, md_name_buf[0..md_len], buf);
+}
+
+/// The `T` handler: a transcript on disk opens in $EDITOR (vi as the
+/// fallback); none, and the recording is transcribed first — the same
+/// `rec transcribe` the user would type. Returns the exit code.
+fn openTranscript(io: std.Io, gpa: std.mem.Allocator, name: []const u8, recordings_path: []const u8) u8 {
+    var md_path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    if (transcriptPath(recordings_path, name, &md_path_buf)) |md_path| {
+        if (std.Io.Dir.cwd().statFile(io, md_path, .{})) |_| {
+            return openInEditor(io, md_path);
+        } else |_| {}
+    }
+    return transcribeNow(io, gpa, name, recordings_path);
+}
+
+/// Opens `path` in the user's $EDITOR, handing the terminal over; returns
+/// the editor's exit code.
+fn openInEditor(io: std.Io, path: []const u8) u8 {
+    const editor = llm.envValue("EDITOR") orelse "vi";
+    var argv = [_][]const u8{ editor, path };
+    var child = std.process.spawn(io, .{
+        .argv = &argv,
+        .stdin = .inherit,
+        .stdout = .inherit,
+        .stderr = .inherit,
+    }) catch {
+        printStderr(io, "play: cannot run the editor\n");
+        return 1;
     };
-    std.posix.sigaction(std.posix.SIG.INT, &act, null);
+    const term = child.wait(io) catch {
+        printStderr(io, "play: editor failed\n");
+        return 1;
+    };
+    return switch (term) {
+        .exited => |code| @truncate(code),
+        else => 1,
+    };
+}
+
+/// Runs the transcribe command for this recording. The selection must be a
+/// null-terminated token, so the name is copied into one.
+fn transcribeNow(io: std.Io, gpa: std.mem.Allocator, name: []const u8, recordings_path: []const u8) u8 {
+    var name_buf: [80]u8 = undefined;
+    if (name.len >= name_buf.len) {
+        printStderr(io, "play: recording name too long to transcribe\n");
+        return 1;
+    }
+    @memcpy(name_buf[0..name.len], name);
+    name_buf[name.len] = 0;
+    const sel: [:0]const u8 = name_buf[0..name.len :0];
+    return transcribecmd.run(
+        io,
+        gpa,
+        &.{sel},
+        llm.envValue("DEEPGRAM_API_KEY"),
+        llm.envValue("HOME") orelse "",
+        recordings_path,
+    );
 }
 
 fn appendStr(buf: []u8, n: *usize, s: []const u8) void {
@@ -490,34 +661,93 @@ const record = @import("record.zig");
 
 // --- pure-view tests ---------------------------------------------------------
 
-test "playedCols maps elapsed time onto the bar width" {
+test "playedCols maps elapsed time onto the grid width" {
     try std.testing.expectEqual(@as(usize, 0), playedCols(80, 0, 100));
     try std.testing.expectEqual(@as(usize, 40), playedCols(80, 50, 100));
     try std.testing.expectEqual(@as(usize, 80), playedCols(80, 100, 100));
-    // Past the end clamps to full; no duration is a flat dark bar.
+    // Past the end clamps to full; no duration is a flat dark grid.
     try std.testing.expectEqual(@as(usize, 80), playedCols(80, 300, 100));
     try std.testing.expectEqual(@as(usize, 0), playedCols(80, 50, 0));
 }
 
-test "statusLine shows state, times, marks, and keys" {
+test "statusLine shows state, times, and the marked span" {
+    var buf: [512]u8 = undefined;
+    try std.testing.expectEqualStrings(
+        "▶ 00:12 / 01:30",
+        statusLine(&buf, .playing, 12.3, 90, null, null, false),
+    );
+    try std.testing.expectEqualStrings(
+        "⏸ 00:12 / 01:30",
+        statusLine(&buf, .paused, 12.3, 90, null, null, false),
+    );
+    // With marks, the resolved span is shown; only one mark resolves
+    // against the recording's edges.
+    try std.testing.expectEqualStrings(
+        "▶ 00:12 / 01:30  [00:05–00:12]",
+        statusLine(&buf, .playing, 12.3, 90, 12.3, 5.1, false),
+    );
+    try std.testing.expectEqualStrings(
+        "▶ 00:12 / 01:30  [00:05–01:30]",
+        statusLine(&buf, .playing, 12.3, 90, 5.1, null, false),
+    );
+}
+
+test "hintsLine lists the keys; R=reset only once marks exist" {
+    var buf: [512]u8 = undefined;
+    try std.testing.expectEqualStrings(
+        "SPACE=pause ←→=1s SHIFT+←→=5s I=in O=out DEL=delete T=transcribe Q=stop",
+        hintsLine(&buf, false, false, false),
+    );
+    try std.testing.expectEqualStrings(
+        "SPACE=pause ←→=1s SHIFT+←→=5s DEL=delete R=reset T=transcribe Q=stop",
+        hintsLine(&buf, true, false, false),
+    );
+    // While paused, SPACE names what it resumes.
+    try std.testing.expectEqualStrings(
+        "SPACE=play ←→=1s SHIFT+←→=5s DEL=delete R=reset T=transcribe Q=stop",
+        hintsLine(&buf, true, true, false),
+    );
+    // Dimmed on a color terminal.
+    try std.testing.expectEqualStrings(
+        "\x1b[2mSPACE=pause ←→=1s SHIFT+←→=5s I=in O=out DEL=delete T=transcribe Q=stop\x1b[0m",
+        hintsLine(&buf, false, false, true),
+    );
+}
+
+test "confirmNote spells out the region and the keys" {
     var buf: [128]u8 = undefined;
     try std.testing.expectEqualStrings(
-        "▶ 00:12 / 01:30  SPACE=pause I=mark O=mark D=delete Q=stop",
-        statusLine(&buf, .playing, 12.3, 90, null, null),
+        "delete 00:05–00:12? ENTER deletes, anything else cancels",
+        confirmNote(&buf, .{ 5.1, 12.3 }),
     );
+}
+
+test "cutNote names the removed span" {
+    var buf: [128]u8 = undefined;
+    try std.testing.expectEqualStrings("cut 00:05–00:12", cutNote(&buf, .{ 5.1, 12.3 }));
+}
+
+test "mapPosition carries the playhead through the cut" {
+    const span = [2]f64{ 5, 10 };
+    // Before the span: stays put.
+    try std.testing.expectApproxEqAbs(@as(f64, 2), mapPosition(2, span), 1e-9);
+    // Inside it: to the span's start.
+    try std.testing.expectApproxEqAbs(@as(f64, 5), mapPosition(7, span), 1e-9);
+    // Past it: shifts back by the removed length.
+    try std.testing.expectApproxEqAbs(@as(f64, 15), mapPosition(20, span), 1e-9);
+}
+
+test "statusLine colors state, times, and marks" {
+    var buf: [512]u8 = undefined;
     try std.testing.expectEqualStrings(
-        "⏸ 00:12 / 01:30  SPACE=play I=mark O=mark D=delete Q=stop",
-        statusLine(&buf, .paused, 12.3, 90, null, null),
+        "\x1b[32m▶\x1b[0m \x1b[1m00:12\x1b[0m\x1b[2m / 01:30\x1b[0m",
+        statusLine(&buf, .playing, 12.3, 90, null, null, true),
     );
-    // With marks, the resolved span is shown and R=reset replaces I/O.
+
+    // The marked span is cyan; the ⏸ paused state is yellow.
     try std.testing.expectEqualStrings(
-        "▶ 00:12 / 01:30  [00:05–00:12]  SPACE=pause D=delete R=reset Q=stop",
-        statusLine(&buf, .playing, 12.3, 90, 12.3, 5.1),
-    );
-    // Only one mark resolves against the recording's edges.
-    try std.testing.expectEqualStrings(
-        "▶ 00:12 / 01:30  [00:05–01:30]  SPACE=pause D=delete R=reset Q=stop",
-        statusLine(&buf, .playing, 12.3, 90, 5.1, null),
+        "\x1b[33m⏸\x1b[0m \x1b[1m00:12\x1b[0m\x1b[2m / 01:30\x1b[0m\x1b[36m  [00:05–00:12]\x1b[0m",
+        statusLine(&buf, .paused, 12.3, 90, 12.3, 5.1, true),
     );
 }
 
@@ -540,19 +770,14 @@ test "cutSpan normalizes the marks into the interval to cut" {
 test "appendTime formats MM:SS and H:MM:SS" {
     var buf: [32]u8 = undefined;
     var n: usize = 0;
-    appendTime(&buf, &n, 12.3);
+    try std.testing.expectEqual(@as(usize, 5), appendTime(&buf, &n, 12.3));
     try std.testing.expectEqualStrings("00:12", buf[0..n]);
 
     n = 0;
-    appendTime(&buf, &n, 3661.0);
+    try std.testing.expectEqual(@as(usize, 8), appendTime(&buf, &n, 3661.0));
     try std.testing.expectEqualStrings("1:01:01", buf[0..n]);
 
     n = 0;
-    appendTime(&buf, &n, -5);
+    _ = appendTime(&buf, &n, -5);
     try std.testing.expectEqualStrings("00:00", buf[0..n]);
-}
-
-test "peakBlockBytes is a hundred ms of audio" {
-    try std.testing.expectEqual(@as(usize, 19200), peakBlockBytes(192000)); // 48 kHz stereo
-    try std.testing.expectEqual(@as(usize, 1), peakBlockBytes(0)); // never zero
 }

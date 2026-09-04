@@ -99,10 +99,20 @@ rec record [--duration <sec>]
 
 Records from the default microphone to `~/recordings/YYYYMMDD-HHMMSS.m4a`
 (AAC-LC, 48 kHz, stereo, via AudioToolbox); `~/recordings/` is created on
-demand. Without `--duration`, recording stops on Ctrl-C; with `--duration
-<sec>` it stops automatically. On a terminal, a live waveform bar shows the
-recording growing in real time. The container is always finalized — a
-failed encode leaves no partial file behind.
+demand. Without `--duration`, recording stops on Ctrl-C or `ESC`; with
+`--duration <sec>` it stops automatically. On a terminal, a live view opens on
+the alternate screen: a ticking timer and a multi-row waveform — the sound as
+it happens, drawn with half-block characters at the terminal's width, colored
+as a VU meter (green quiet, yellow loud, red peaking). `SPACE` pauses and
+resumes; paused audio is dropped, so the file keeps only what you meant to
+record. Your scrollback stays clean and resizing the window mid-recording
+never scrambles the display. The container is always finalized — a failed
+encode leaves no partial file behind.
+
+| Key | Action |
+|-----|--------|
+| `SPACE` | Pause / resume (paused audio is discarded) |
+| `ESC` / `Ctrl-C` | Stop and save |
 
 ### list
 
@@ -120,27 +130,36 @@ Both `.m4a` and pre-existing `.wav` recordings are listed.
 rec play <index|filename>
 ```
 
-Plays a recording through the default output device via `/usr/bin/afplay`.
-The selection can be an index from `list` or a filename (with or without the
+Plays a recording through the default output device, in-process: the file is
+decoded once and the same PCM feeds the waveform and the speaker. The
+selection can be an index from `list` or a filename (with or without the
 `recordings/` prefix).
 
-On a terminal, playback is interactive: a live waveform bar shows the
-playback position, and when the recording has a transcript (`NAME.md`) it is
-printed in full first. Keys:
+On a terminal, playback is interactive: the same live view as the recorder —
+a multi-row waveform opening at the terminal's width — plus a bright cursor
+column walking over it at the playback position (on the alternate screen).
+The part already played is bright, the rest dimmed, and a marked region shows
+in reverse video between its two full-height anchor cursors. When the
+recording has a transcript (`NAME.md`) it is printed in full first. Keys:
 
 | Key | Action |
 |-----|--------|
 | `SPACE` | Pause / resume |
-| `I` / `O` | Mark the start / end of the piece to cut |
-| `D` | Remove the marked piece, replacing the original recording |
-| `R` | Clear the marks |
+| `←` / `→` | Seek 1 second back / forward |
+| `SHIFT`+`←` / `SHIFT`+`→` | Seek 5 seconds back / forward |
+| `I` / `O` | Anchor the start / end of the region to cut |
+| `DELETE` | Ask to remove the anchored region — `ENTER` confirms |
+| `T` | Transcribe the recording, or open the transcript if it has one |
+| `R` | Clear the anchors |
 | `Q` / `Ctrl-C` | Stop playback |
 
-The marked piece is shown in reverse video on the waveform bar. Cutting
-removes the piece between the marks (head, tail, or middle) and replaces the
-original file; the transcript (`NAME.md`) is left untouched.
+Cutting removes the piece between the anchors (head, tail, or middle) after
+`ENTER` confirms the prompt, replaces the original file, and keeps playing —
+the waveform redraws from the shortened recording and the playhead lands
+where it was; a note under the grid confirms the cut. The transcript
+(`NAME.md`) is left untouched.
 
-Off a terminal (piped output), playback is plain `afplay`; `Ctrl-C` stops it.
+Off a terminal (piped output), playback runs to completion; `Ctrl-C` stops it.
 
 ### transcribe
 
@@ -211,12 +230,21 @@ The choice is validated with a real call before it's saved to
 
 Running `rec` with no subcommand enters a minimal interactive menu:
 
-- `r` — start recording (any key or Ctrl-C stops)
+- `r` — start recording (`SPACE` pauses, `ESC` or Ctrl-C stops)
 - `l` — list recordings
 - `<number>` + Enter — play that recording
 - `q` — quit
 
 Raw terminal mode is restored on exit, including after Ctrl-C.
+
+### Colors
+
+The live views (record, play), the `list` table, and the interactive menu are
+colored on a terminal: the waveform columns are a VU meter (green → yellow →
+red), the playback cursor is a bright white column, the ⏺ recording dot is
+red, the ▶/⏸ playback state is green/yellow, and secondary text is dimmed.
+Piped output carries no ANSI codes, so scripts can keep grepping it; set
+`NO_COLOR` to opt out on a terminal too (the waveform shape and cursor stay).
 
 ## Build from source
 
@@ -230,10 +258,9 @@ zig build
 zig build test     # unit tests: encoder, parsers, prompts, arg parsing
 ```
 
-The binary lands at `zig-out/bin/rec`. Audio I/O uses the vendored
-[miniaudio](https://miniaud.io) library; playback shells out to the system
-player; releases are built in `ReleaseFast` mode (see
-`.github/workflows/release.yml`).
+The binary lands at `zig-out/bin/rec`. Audio I/O (capture and playback) uses
+the vendored [miniaudio](https://miniaud.io) library; releases are built in
+`ReleaseFast` mode (see `.github/workflows/release.yml`).
 
 ## How it works
 
@@ -245,8 +272,9 @@ player; releases are built in `ReleaseFast` mode (see
 - **Library** — `src/library.zig` scans `~/recordings/` (M4A + legacy WAV),
   sorts newest-first, and formats what `list` prints; numeric selections are
   always relative to this order across every command.
-- **Playback** — `src/playback.zig` spawns `/usr/bin/afplay` and forwards
-  interrupts instead of reimplementing audio output.
+- **Playback** — `src/player.zig` plays the decoded PCM on miniaudio's
+  default output device with an atomic playhead (seek is a store, pause a
+  gate); `src/playback.zig` is the interactive view and key loop over it.
 - **Transcription** — `src/transcribe.zig` shells out to `/usr/bin/curl` for
   Deepgram's pre-recorded API; `src/okf.zig` renders the markdown bundle.
 - **LLM processing** — `src/llm.zig` drives coding-agent CLIs
