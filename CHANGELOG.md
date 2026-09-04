@@ -1,5 +1,23 @@
 # Changelog
 
+## [1.6.0](https://github.com/feliperun/rec/compare/v1.5.0...v1.6.0) (2026-09-04)
+
+
+### Features
+
+* color the terminal views with a tty-gated palette ([5e06475](https://github.com/feliperun/rec/commit/5e06475f5b57f93233f27c4c022e28719cb5ade0))
+* keep playing after a confirmed cut ([ec2ac2a](https://github.com/feliperun/rec/commit/ec2ac2ab92a20c4c70ad146a4bf408f9d8980dcb))
+* redraw the live views as half-block waveforms and play audio in-process ([c4fd03e](https://github.com/feliperun/rec/commit/c4fd03eecc2b0dc7a17e29c138fd11410e679e90))
+* redraw the live views as half-block waveforms and play audio in-process ([6e1b8a5](https://github.com/feliperun/rec/commit/6e1b8a5522b3ba7b1e16f2c773cda9187e5a2992))
+* region selection, confirmed delete, and a transcript shortcut on play ([57e5588](https://github.com/feliperun/rec/commit/57e55889e329ab189c6e652740cdac7d70c5ef39))
+
+
+### Bug Fixes
+
+* draw live views on the alternate screen ([ee12cef](https://github.com/feliperun/rec/commit/ee12cef489d2f8a444e5424789e83614a86bb145))
+* redraw live views relative to their wrapped rows so resizes don't garble them ([e2c6d51](https://github.com/feliperun/rec/commit/e2c6d51c04b258182340e711dc390ff05378cea6))
+* write each live view as one frame per tick with the cursor hidden ([53b43ef](https://github.com/feliperun/rec/commit/53b43ef2828c1a115e6eb087b7b2fd8c8dbd33c9))
+
 ## [1.5.0](https://github.com/feliperun/rec/compare/v1.4.0...v1.5.0) (2026-09-02)
 
 
