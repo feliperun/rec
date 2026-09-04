@@ -1,6 +1,7 @@
 const std = @import("std");
 const capture = @import("capture.zig");
 const library = @import("library.zig");
+const live = @import("live.zig");
 const m4a = @import("m4a.zig");
 const waveform = @import("waveform.zig");
 
@@ -89,6 +90,7 @@ pub fn recordOnce(
     var view: std.ArrayList(waveform.Peak) = .empty;
     defer view.deinit(gpa);
     var consumed: usize = 0;
+    var screen = live.Block{}; // the live line currently on the terminal
 
     while (true) {
         const now = std.Io.Timestamp.now(io, .awake);
@@ -105,7 +107,7 @@ pub fn recordOnce(
         };
         tracker.feed(new_pcm.items);
         const secs: u32 = @intCast(@divTrunc(now.nanoseconds - started_at.nanoseconds, std.time.ns_per_s));
-        printLiveLine(io, secs, tracker.view(&view) catch &.{});
+        printLiveLine(io, secs, tracker.view(&view) catch &.{}, &screen);
         io.sleep(.fromMilliseconds(100), .awake) catch {};
     }
 
@@ -116,7 +118,10 @@ pub fn recordOnce(
         printStderr(io, "record: failed to encode M4A audio\n");
         return 1;
     };
-    printStderr(io, "\r\x1b[K"); // clear the live line for the summary below
+    // Clear the live line — every row it wrapped across after a resize —
+    // for the summary below.
+    var erase_buf: [64]u8 = undefined;
+    printStderr(io, screen.erase(waveform.termWidth(), &erase_buf));
 
     // Dispose flushes the moov atom. The public name is exposed only after
     // that succeeds, so an interrupted run leaves no corrupt .m4a behind.
@@ -210,8 +215,10 @@ fn durationNanoseconds(sec: f64) i96 {
 
 /// The live recording line: carriage return, timer, and the growing
 /// waveform bar filling the rest of `width`, all bright. Composed in one
-/// pass for a single write per tick.
-fn composeLiveLine(buf: []u8, secs: u32, peaks: []const waveform.Peak, width: usize) []const u8 {
+/// pass for a single write per tick. `cols_out` receives the line's display
+/// columns (everything but the `\r`, with ⏺ counted as one cell) so the
+/// caller can erase it again after a resize wraps it.
+fn composeLiveLine(buf: []u8, secs: u32, peaks: []const waveform.Peak, width: usize, cols_out: *usize) []const u8 {
     var n: usize = 0;
     appendStr(buf, &n, "\r ⏺ ");
     const hours = secs / 3600;
@@ -232,12 +239,20 @@ fn composeLiveLine(buf: []u8, secs: u32, peaks: []const waveform.Peak, width: us
     appendStr(buf, &n, " ");
     const bar_width = @min(width -| n, 300);
     n += @intCast(waveform.renderBar(peaks, bar_width, bar_width, null, buf[n..]).len);
+    // Display columns: the byte count minus the \r and the extra bytes of
+    // the multi-byte glyphs (⏺ and each block are one cell).
+    cols_out.* = n - 3 - 2 * bar_width;
     return buf[0..n];
 }
 
-fn printLiveLine(io: std.Io, secs: u32, peaks: []const waveform.Peak) void {
+fn printLiveLine(io: std.Io, secs: u32, peaks: []const waveform.Peak, screen: *live.Block) void {
+    var erase_buf: [64]u8 = undefined;
+    printStderr(io, screen.erase(waveform.termWidth(), &erase_buf));
+    var cols: usize = 0;
     var buf: [1024]u8 = undefined;
-    printStderr(io, composeLiveLine(&buf, secs, peaks, waveform.termWidth()));
+    const line = composeLiveLine(&buf, secs, peaks, waveform.termWidth(), &cols);
+    printStderr(io, line);
+    screen.push(cols);
 }
 
 fn printSaved(io: std.Io, path: []const u8, dur_csec: u64, bytes: u64) void {
@@ -313,19 +328,27 @@ test "composeLiveLine draws the timer and a growing bar" {
     var buf: [1024]u8 = undefined;
     // Levels 0,2,4,6,7 on the first five columns; the rest is silence.
     const peaks = [_]waveform.Peak{ 0, 8192, 16384, 24576, 32767 };
-    const line = composeLiveLine(&buf, 5, &peaks, 20);
+    var cols: usize = 0;
+    const line = composeLiveLine(&buf, 5, &peaks, 20, &cols);
     try std.testing.expectEqualStrings("\r ⏺ 00:05 ▁▃▅▇█▁▁▁", line);
+    // 3 cells of " ⏺ " + 5 timer + 1 space + 8 bar.
+    try std.testing.expectEqual(@as(usize, 17), cols);
 }
 
 test "composeLiveLine switches to H:MM:SS past an hour" {
     var buf: [1024]u8 = undefined;
-    // 6 chars of "⏺ " prefix + 8 chars of "1:01:01 " → 26 bar columns.
-    const line = composeLiveLine(&buf, 3661, &.{}, 40);
-    try std.testing.expectEqualStrings("\r ⏺ 1:01:01 ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁", line);
+    var cols: usize = 0;
+    // 40 - 14 bytes of prefix/timer = 26 bar columns.
+    const line = composeLiveLine(&buf, 3661, &.{}, 40, &cols);
+    try std.testing.expectEqualStrings("\r ⏺ 1:01:01 " ++ ("▁" ** 26), line);
+    // 3 cells of " ⏺ " + 7 timer + 1 space + 26 bar.
+    try std.testing.expectEqual(@as(usize, 37), cols);
 }
 
 test "composeLiveLine clamps the bar on a narrow terminal" {
     var buf: [64]u8 = undefined;
-    const line = composeLiveLine(&buf, 5, &.{}, 8);
+    var cols: usize = 0;
+    const line = composeLiveLine(&buf, 5, &.{}, 8, &cols);
     try std.testing.expectEqualStrings("\r ⏺ 00:05 ", line);
+    try std.testing.expectEqual(@as(usize, 9), cols);
 }

@@ -490,6 +490,7 @@ test {
     _ = @import("record.zig");
     _ = @import("formatcmd.zig");
     _ = @import("library.zig");
+    _ = @import("live.zig");
     _ = @import("llm.zig");
     _ = @import("playback.zig");
     _ = @import("prompts.zig");

@@ -1,5 +1,6 @@
 const std = @import("std");
 const library = @import("library.zig");
+const live = @import("live.zig");
 const prompts = @import("prompts.zig");
 const cut = @import("cut.zig");
 const waveform = @import("waveform.zig");
@@ -208,7 +209,7 @@ fn playInteractive(
     var state: PlayState = .playing;
     var paused_ns: i128 = 0;
     var pause_started = started;
-    var first_draw = true;
+    var screen = live.Block{}; // the view currently on the terminal
     var exit_code: u8 = 0;
     var reaped = false;
     // The piece to cut, anchored at the positions where I and O were
@@ -238,7 +239,7 @@ fn playInteractive(
         const elapsed_ns = ref.nanoseconds - started.nanoseconds - paused_ns;
         const elapsed_sec = @as(f64, @floatFromInt(@max(elapsed_ns, 0))) / 1e9;
 
-        draw(io, state, elapsed_sec, duration_sec, peaks, mark_in, mark_out, &first_draw);
+        draw(io, state, elapsed_sec, duration_sec, peaks, mark_in, mark_out, &screen);
 
         switch (readKey(io, tick_ms)) {
             .none => {},
@@ -270,14 +271,14 @@ fn playInteractive(
                 },
                 'd', 'D' => {
                     const span = cutSpan(mark_in, mark_out, duration_sec) orelse {
-                        drawNote(io, "mark the piece with I and O first", &first_draw);
+                        drawNote(io, "mark the piece with I and O first", &screen);
                         continue :keys;
                     };
                     // A cut needs at least 0.2 s on both sides: the marked
                     // piece must be real, and it must not eat the file.
                     const removed = span[1] - span[0];
                     if (removed < 0.2 or duration_sec - removed < 0.2) {
-                        drawNote(io, "nothing to cut: marks too close or covering everything", &first_draw);
+                        drawNote(io, "nothing to cut: marks too close or covering everything", &screen);
                         continue :keys;
                     }
                     stopChild(pid, &reaped);
@@ -339,8 +340,9 @@ fn termWidth() usize {
     return waveform.termWidth();
 }
 
-/// Draws the two-line view: on the first draw the lines are printed, after
-/// that the cursor climbs back one line and both are rewritten in place.
+/// Draws the two-line view in place: everything the previous draw (or note)
+/// left on screen is erased first — including rows wrapped by a resize —
+/// then both lines are rewritten at the current width.
 fn draw(
     io: std.Io,
     state: PlayState,
@@ -349,29 +351,32 @@ fn draw(
     peaks: []const waveform.Peak,
     mark_in: ?f64,
     mark_out: ?f64,
-    first_draw: *bool,
+    screen: *live.Block,
 ) void {
     const width = termWidth();
-    var line: [512]u8 = undefined;
+    var erase_buf: [64]u8 = undefined;
+    printStderr(io, screen.erase(width, &erase_buf));
 
-    if (!first_draw.*) printStderr(io, "\x1b[1A\r");
-    printStderr(io, statusLine(&line, state, elapsed_sec, duration_sec, mark_in, mark_out));
-    printStderr(io, "\x1b[K\n");
+    var line: [512]u8 = undefined;
+    var cols: usize = 0;
+    printStderr(io, statusLine(&line, state, elapsed_sec, duration_sec, mark_in, mark_out, &cols));
+    screen.push(cols);
+    printStderr(io, "\n");
     const sel: ?waveform.SelRange = if (cutSpan(mark_in, mark_out, duration_sec)) |s|
         .{ .start_col = playedCols(width, s[0], duration_sec), .end_col = playedCols(width, s[1], duration_sec) }
     else
         null;
     printStderr(io, waveform.renderBar(peaks, width, playedCols(width, elapsed_sec, duration_sec), sel, &line));
-    printStderr(io, "\x1b[K");
-    first_draw.* = false;
+    screen.push(width);
 }
 
-/// A transient one-line notice under the view; the next redraw covers it.
-fn drawNote(io: std.Io, msg: []const u8, first_draw: *bool) void {
-    if (!first_draw.*) printStderr(io, "\x1b[1B\r"); // back onto the status line
+/// A transient one-line notice under the view; the next redraw erases it
+/// along with the rest of the block.
+fn drawNote(io: std.Io, msg: []const u8, screen: *live.Block) void {
+    printStderr(io, "\x1b[1B\r"); // the row under the waveform
     printStderr(io, msg);
-    printStderr(io, "\x1b[K\r");
-    first_draw.* = true; // the next draw reprints both lines in place
+    printStderr(io, "\x1b[K");
+    screen.push(msg.len); // notes are plain ASCII
 }
 
 /// How many columns of the bar the playback has covered.
@@ -395,8 +400,9 @@ fn cutSpan(mark_in: ?f64, mark_out: ?f64, duration_sec: f64) ?[2]f64 {
 
 /// "▶ 00:12 / 01:30  SPACE=pause I=mark O=mark D=delete Q=stop" — the whole
 /// status line. With marks set, the resolved span is shown and R=reset
-/// replaces the I/O hints, which are already in place.
-fn statusLine(buf: []u8, state: PlayState, elapsed_sec: f64, duration_sec: f64, mark_in: ?f64, mark_out: ?f64) []const u8 {
+/// replaces the I/O hints, which are already in place. `cols_out` receives
+/// the display columns (the ▶/⏸ glyph is one cell of its three bytes).
+fn statusLine(buf: []u8, state: PlayState, elapsed_sec: f64, duration_sec: f64, mark_in: ?f64, mark_out: ?f64, cols_out: *usize) []const u8 {
     var n: usize = 0;
     appendStr(buf, &n, if (state == .playing) "▶ " else "⏸ ");
     appendTime(buf, &n, elapsed_sec);
@@ -417,6 +423,7 @@ fn statusLine(buf: []u8, state: PlayState, elapsed_sec: f64, duration_sec: f64, 
     } else {
         appendStr(buf, &n, " I=mark O=mark D=delete Q=stop");
     }
+    cols_out.* = n - 2;
     return buf[0..n];
 }
 
@@ -501,23 +508,25 @@ test "playedCols maps elapsed time onto the bar width" {
 
 test "statusLine shows state, times, marks, and keys" {
     var buf: [128]u8 = undefined;
+    var cols: usize = 0;
     try std.testing.expectEqualStrings(
         "▶ 00:12 / 01:30  SPACE=pause I=mark O=mark D=delete Q=stop",
-        statusLine(&buf, .playing, 12.3, 90, null, null),
+        statusLine(&buf, .playing, 12.3, 90, null, null, &cols),
     );
+    try std.testing.expectEqual(@as(usize, 58), cols);
     try std.testing.expectEqualStrings(
         "⏸ 00:12 / 01:30  SPACE=play I=mark O=mark D=delete Q=stop",
-        statusLine(&buf, .paused, 12.3, 90, null, null),
+        statusLine(&buf, .paused, 12.3, 90, null, null, &cols),
     );
     // With marks, the resolved span is shown and R=reset replaces I/O.
     try std.testing.expectEqualStrings(
         "▶ 00:12 / 01:30  [00:05–00:12]  SPACE=pause D=delete R=reset Q=stop",
-        statusLine(&buf, .playing, 12.3, 90, 12.3, 5.1),
+        statusLine(&buf, .playing, 12.3, 90, 12.3, 5.1, &cols),
     );
     // Only one mark resolves against the recording's edges.
     try std.testing.expectEqualStrings(
         "▶ 00:12 / 01:30  [00:05–01:30]  SPACE=pause D=delete R=reset Q=stop",
-        statusLine(&buf, .playing, 12.3, 90, 5.1, null),
+        statusLine(&buf, .playing, 12.3, 90, 5.1, null, &cols),
     );
 }
 
