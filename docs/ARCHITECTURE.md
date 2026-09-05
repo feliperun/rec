@@ -53,9 +53,13 @@ verbs in a raw-mode interactive menu.
 
 ## Runtime & hosting
 
-Local CLI on Apple Silicon macOS. Built as a single `rec` binary
-(`zig build`, ReleaseFast in CI), installed via `install.sh` to
-`/usr/local/bin`. Released with release-please (Conventional Commits).
+Local CLI on macOS (Apple Silicon and Intel), Linux, and Windows. Built as a
+single static `rec` binary per target with one zig toolchain (`zig build`,
+ReleaseFast in CI); each native platform runs `zig build test` on its own CI
+runner, the other targets cross-compile ([ADR 0013](adr/0013-cross-platform-builds.md)).
+Releases ship `rec-<os>-<arch>` binaries, installed via `install.sh` (macOS,
+Linux) or `install.ps1` (Windows). Released with release-please
+(Conventional Commits).
 
 ## Observability & quality
 

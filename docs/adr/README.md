@@ -57,3 +57,5 @@ proposed → active → superseded
 | [0009](0009-alternate-screen-live-views.md) | Draw live views on the alternate screen | active |
 | [0010](0010-play-audio-in-process.md) | Play audio in-process instead of spawning afplay | active |
 | [0011](0011-waveform-half-block-grid.md) | Render waveforms as a multi-row half-block grid | active |
+| [0012](0012-recording-format-per-platform.md) | Recording format follows the platform: M4A on macOS, WAV elsewhere | active |
+| [0013](0013-cross-platform-builds.md) | Cross-platform builds: one zig toolchain, three native test runners | active |
