@@ -42,7 +42,7 @@ pub const Release = struct {
 pub fn run(io: std.Io, gpa: std.mem.Allocator) u8 {
     print(io, "Procurando atualização...\n");
     var version_buf: [32]u8 = undefined;
-    switch (checkAndApply(io, gpa, &version_buf)) {
+    switch (checkAndApply(io, gpa, &version_buf, true)) {
         .updated => |version| {
             print(io, "Atualizado para ");
             print(io, version);
@@ -81,7 +81,7 @@ pub fn autoCheck(io: std.Io, gpa: std.mem.Allocator, config_dir: []const u8) voi
     writeCheckedAt(io, gpa, state_path);
 
     var version_buf: [32]u8 = undefined;
-    switch (checkAndApply(io, gpa, &version_buf)) {
+    switch (checkAndApply(io, gpa, &version_buf, false)) {
         .updated => |version| {
             print(io, "rec: atualizado para ");
             print(io, version);
@@ -105,7 +105,7 @@ const Outcome = union(enum) {
     apply_failed,
 };
 
-fn checkAndApply(io: std.Io, gpa: std.mem.Allocator, version_out: []u8) Outcome {
+fn checkAndApply(io: std.Io, gpa: std.mem.Allocator, version_out: []u8, verbose: bool) Outcome {
     var asset_buf: [64]u8 = undefined;
     const asset = assetName(&asset_buf) orelse return .no_release;
 
@@ -120,7 +120,7 @@ fn checkAndApply(io: std.Io, gpa: std.mem.Allocator, version_out: []u8) Outcome 
         .lt => {},
     }
 
-    if (!apply(io, gpa, r.url)) return .apply_failed;
+    if (!apply(io, gpa, r.url, verbose)) return .apply_failed;
     const version = version_out[0..@min(version_out.len, r.version.len)];
     @memcpy(version, r.version[0..version.len]);
     return .{ .updated = version };
@@ -236,7 +236,7 @@ fn fetch(io: std.Io, gpa: std.mem.Allocator, url: []const u8, timeout_s: u32) ?[
 /// Windows the running exe steps aside as `.old` first (renaming a running
 /// image is allowed; deleting it is not) and a stale `.old` from a previous
 /// update is removed before the dance.
-fn apply(io: std.Io, gpa: std.mem.Allocator, url: []const u8) bool {
+fn apply(io: std.Io, gpa: std.mem.Allocator, url: []const u8, verbose: bool) bool {
     var exe_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const exe_len = std.process.executablePath(io, &exe_buf) catch return false;
     const exe = exe_buf[0..exe_len];
@@ -251,7 +251,7 @@ fn apply(io: std.Io, gpa: std.mem.Allocator, url: []const u8) bool {
     std.Io.Dir.cwd().deleteFile(io, tmp) catch {};
     if (builtin.os.tag == .windows) std.Io.Dir.cwd().deleteFile(io, old) catch {};
 
-    if (!downloadTo(io, gpa, url, tmp)) return false;
+    if (!downloadTo(io, gpa, url, tmp, verbose)) return false;
 
     if (builtin.os.tag != .windows) {
         // curl writes 0644 through the umask; the replacement must stay
@@ -263,14 +263,35 @@ fn apply(io: std.Io, gpa: std.mem.Allocator, url: []const u8) bool {
         return true;
     }
 
-    std.Io.Dir.renameAbsolute(exe, old, io) catch return fail(io, tmp);
-    std.Io.Dir.renameAbsolute(tmp, exe, io) catch {
-        // Put the old image back so `rec` keeps working.
-        std.Io.Dir.renameAbsolute(old, exe, io) catch {};
+    // std's rename asks the kernel for POSIX rename semantics, which is
+    // denied for a file with an active image section — the running
+    // executable itself. MoveFileExW is the battle-tested way to run the
+    // dance: the running exe steps aside, the download takes its place,
+    // and a failed second step rolls the old image back.
+    if (!moveFileEx(gpa, exe, old, false)) return fail(io, tmp);
+    if (!moveFileEx(gpa, tmp, exe, true)) {
+        _ = moveFileEx(gpa, old, exe, false);
         return fail(io, tmp);
-    };
+    }
     std.Io.Dir.cwd().deleteFile(io, old) catch {};
     return true;
+}
+
+const movefile_replace_existing: std.os.windows.DWORD = 0x1;
+
+pub extern "kernel32" fn MoveFileExW(
+    lpExistingFileName: std.os.windows.LPCWSTR,
+    lpNewFileName: std.os.windows.LPCWSTR,
+    dwFlags: std.os.windows.DWORD,
+) callconv(.winapi) std.os.windows.BOOL;
+
+fn moveFileEx(gpa: std.mem.Allocator, from: []const u8, to: []const u8, replace: bool) bool {
+    const from_w = std.unicode.utf8ToUtf16LeAllocZ(gpa, from) catch return false;
+    defer gpa.free(from_w);
+    const to_w = std.unicode.utf8ToUtf16LeAllocZ(gpa, to) catch return false;
+    defer gpa.free(to_w);
+    const flags: std.os.windows.DWORD = if (replace) movefile_replace_existing else 0;
+    return MoveFileExW(from_w.ptr, to_w.ptr, flags) != .FALSE;
 }
 
 fn fail(io: std.Io, tmp: []const u8) bool {
@@ -278,17 +299,32 @@ fn fail(io: std.Io, tmp: []const u8) bool {
     return false;
 }
 
-fn downloadTo(io: std.Io, gpa: std.mem.Allocator, url: []const u8, dest: []const u8) bool {
+fn downloadTo(io: std.Io, gpa: std.mem.Allocator, url: []const u8, dest: []const u8, verbose: bool) bool {
     var dest_arg_buf: [std.Io.Dir.max_path_bytes + 4]u8 = undefined;
     const dest_arg = std.fmt.bufPrint(&dest_arg_buf, "-o{s}", .{dest}) catch return false;
     var timeout_buf: [16]u8 = undefined;
     const timeout = std.fmt.bufPrint(&timeout_buf, "{d}", .{download_timeout_s}) catch return false;
     const argv = [_][]const u8{ curl_path, "-fsSL", "--max-time", timeout, dest_arg, url };
-    const result = std.process.run(gpa, io, .{ .argv = &argv }) catch return false;
-    const ok = switch (result.term) {
-        .exited => |code| code == 0,
-        else => false,
+    const result = std.process.run(gpa, io, .{ .argv = &argv }) catch {
+        if (verbose) print(io, "curl não pôde ser executado.\n");
+        return false;
     };
+    const code: ?u32 = switch (result.term) {
+        .exited => |code| code,
+        else => null,
+    };
+    const ok = code != null and code.? == 0;
+    if (!ok and verbose) {
+        print(io, "curl ");
+        if (code) |c| {
+            var code_buf: [16]u8 = undefined;
+            print(io, std.fmt.bufPrint(&code_buf, "saiu com código {d}", .{c}) catch "falhou");
+        } else print(io, "terminou de forma anormal");
+        print(io, ": ");
+        // curl -s keeps stderr quiet except for the actual diagnostic.
+        print(io, std.mem.trim(u8, result.stderr, " \t\r\n"));
+        print(io, "\n");
+    }
     gpa.free(result.stdout);
     gpa.free(result.stderr);
     return ok;
