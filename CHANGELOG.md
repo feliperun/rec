@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.8.1](https://github.com/feliperun/rec/compare/v1.8.0...v1.8.1) (2026-09-05)
+
+
+### Bug Fixes
+
+* replace the running image with MoveFileExW ([514362b](https://github.com/feliperun/rec/commit/514362b8dff08e9a038157c4b6663d52f4c6758c))
+* windows release asset and self-replacement ([8fa1b65](https://github.com/feliperun/rec/commit/8fa1b652dcd5f6c006418f671d46e4c6aa55940e))
+
 ## [1.8.0](https://github.com/feliperun/rec/compare/v1.7.0...v1.8.0) (2026-09-05)
 
 
