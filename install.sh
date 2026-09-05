@@ -1,33 +1,40 @@
 #!/bin/sh
-# Installs the latest release of rec (https://github.com/feliperun/rec) to
-# /usr/local/bin. Usage:
+# Installs a release of rec (https://github.com/feliperun/rec) to /usr/local/bin,
+# picking the build for the running OS and architecture. Usage:
 #
 #   curl -fsSL https://raw.githubusercontent.com/feliperun/rec/main/install.sh | sh
 #
+# Overrides: VERSION=<tag> installs that release instead of the latest;
+# INSTALL_DIR=<dir> installs there instead of /usr/local/bin.
+# On Windows use install.ps1 (irm https://... /install.ps1 | iex).
 set -eu
 
 REPO="feliperun/rec"
 INSTALL_DIR="${INSTALL_DIR:-/usr/local/bin}"
 BIN_NAME="rec"
+VERSION="${VERSION:-}"
 
-os="$(uname -s)"
-if [ "$os" != "Darwin" ]; then
-  echo "error: $BIN_NAME only ships macOS builds (detected: $os)" >&2
-  exit 1
+case "$(uname -s) $(uname -m)" in
+  "Darwin arm64" | "Darwin aarch64") asset="rec-macos-arm64" ;;
+  "Darwin x86_64") asset="rec-macos-intel" ;;
+  "Linux x86_64") asset="rec-linux-x64" ;;
+  "Linux aarch64" | "Linux arm64") asset="rec-linux-arm64" ;;
+  *)
+    echo "error: no ${BIN_NAME} build for $(uname -s) ($(uname -m))" >&2
+    echo "on Windows use: irm https://raw.githubusercontent.com/${REPO}/main/install.ps1 | iex" >&2
+    exit 1
+    ;;
+esac
+
+release_url="https://api.github.com/repos/${REPO}/releases/latest"
+if [ -n "$VERSION" ]; then
+  release_url="https://api.github.com/repos/${REPO}/releases/tags/${VERSION}"
 fi
 
-arch="$(uname -m)"
-if [ "$arch" != "arm64" ]; then
-  echo "error: $BIN_NAME only ships Apple Silicon (arm64) builds (detected: $arch)" >&2
-  exit 1
-fi
-asset="rec-macos-arm64"
-
-api_url="https://api.github.com/repos/${REPO}/releases/latest"
-download_url="$(curl -fsSL "$api_url" | grep -o "\"browser_download_url\": *\"[^\"]*${asset}\"" | sed -E 's/.*"(https:[^"]+)"/\1/')"
+download_url="$(curl -fsSL "$release_url" | grep -o "\"browser_download_url\": *\"[^\"]*${asset}\"" | sed -E 's/.*"(https:[^"]+)"/\1/')"
 
 if [ -z "$download_url" ]; then
-  echo "error: could not find a '${asset}' asset in the latest release of ${REPO}" >&2
+  echo "error: could not find a '${asset}' asset in ${release_url}" >&2
   exit 1
 fi
 
