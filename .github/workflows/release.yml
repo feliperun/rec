@@ -31,11 +31,14 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { runs-on: macos-14, target: aarch64-macos, artifact: rec-macos-arm64, bin: rec }
-          - { runs-on: macos-14, target: x86_64-macos, artifact: rec-macos-intel, bin: rec }
-          - { runs-on: ubuntu-latest, target: x86_64-linux, artifact: rec-linux-x64, bin: rec }
-          - { runs-on: ubuntu-latest, target: aarch64-linux, artifact: rec-linux-arm64, bin: rec }
-          - { runs-on: windows-latest, target: x86_64-windows, artifact: rec-windows-x64.exe, bin: rec.exe }
+          - { runs-on: macos-14, target: aarch64-macos, artifact: rec-macos-arm64, bin: rec, sanity: true }
+          # Rosetta runs the Intel build on the arm64 macOS runner.
+          - { runs-on: macos-14, target: x86_64-macos, artifact: rec-macos-intel, bin: rec, sanity: true }
+          - { runs-on: ubuntu-latest, target: x86_64-linux, artifact: rec-linux-x64, bin: rec, sanity: true }
+          # No emulator on the x64 runner: the staged arm64 binary ships
+          # unexecuted.
+          - { runs-on: ubuntu-latest, target: aarch64-linux, artifact: rec-linux-arm64, bin: rec, sanity: false }
+          - { runs-on: windows-latest, target: x86_64-windows, artifact: rec-windows-x64.exe, bin: rec.exe, sanity: true }
     runs-on: ${{ matrix.runs-on }}
     steps:
       - uses: actions/checkout@v4
@@ -55,6 +58,7 @@ jobs:
       - run: cp "zig-out/bin/${{ matrix.bin }}" "dist/${{ matrix.artifact }}"
       # The staged artifact must itself run before it ships.
       - run: ./dist/${{ matrix.artifact }} about
+        if: matrix.sanity
       - run: gh release upload "${{ needs.release-please.outputs.tag_name }}" "dist/${{ matrix.artifact }}" --clobber
         env:
           GH_TOKEN: ${{ github.token }}
