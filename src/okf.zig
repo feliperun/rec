@@ -86,12 +86,24 @@ const Tm = extern struct {
 
 extern "c" fn time(now: ?*i64) i64;
 extern "c" fn gmtime_r(now: *const i64, result: *Tm) ?*Tm;
+// Windows CRT: no _r functions — gmtime fills a static buffer (fine; the
+// caller copies it out immediately).
+extern "c" fn gmtime(now: *const i64) ?*Tm;
+
+fn utcTime(now: *const i64, out: *Tm) bool {
+    if (@import("builtin").os.tag == .windows) {
+        const t = gmtime(now) orelse return false;
+        out.* = t.*;
+        return true;
+    }
+    return gmtime_r(now, out) != null;
+}
 
 /// "YYYY-MM-DDTHH:MM:SSZ" (20 bytes) from the wall clock, in UTC.
 pub fn utcTimestamp(out: *[20]u8) void {
     const now: i64 = time(null);
     var tm: Tm = undefined;
-    if (gmtime_r(&now, &tm) == null) {
+    if (!utcTime(&now, &tm)) {
         @memcpy(out, "1970-01-01T00:00:00Z");
         return;
     }

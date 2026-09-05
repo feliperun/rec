@@ -1,6 +1,8 @@
 const std = @import("std");
 
-const curl_path = "/usr/bin/curl";
+/// System curl: the pinned absolute path on POSIX, the PATH one on Windows
+/// (System32 ships curl.exe and spawn resolves bare names from PATH).
+const curl_path = if (@import("builtin").os.tag == .windows) "curl" else "/usr/bin/curl";
 
 // Query parameters are fixed by the spec and their order is pinned by tests;
 // only `language` is spliced in, verbatim.

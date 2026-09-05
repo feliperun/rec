@@ -84,7 +84,7 @@ pub const Loaded = struct {
 /// chunks. Anything else is not ours to read.
 pub fn loadPcm(gpa: std.mem.Allocator, path: []const u8) CutError!Loaded {
     if (std.mem.endsWith(u8, path, ".wav")) {
-        const image = readWholeFile(gpa, path) catch return error.CannotDecode;
+        const image = wav.readWholeFile(gpa, path) catch return error.CannotDecode;
         errdefer gpa.free(image);
         const parsed = wav.parseWav(image) orelse return error.CannotDecode;
         return .{
@@ -177,36 +177,6 @@ pub fn cutIntervalFile(io: std.Io, gpa: std.mem.Allocator, path: []const u8, sta
 /// A recording's stem: the name without its .m4a/.wav extension.
 const stripExt = library.stripExt;
 
-// libc file I/O (libc is already linked for miniaudio): a plain read() into
-// owned memory, so the image's lifetime is exactly ours to manage.
-extern "c" fn open(path: [*:0]const u8, oflag: c_int, ...) c_int;
-extern "c" fn read(fd: c_int, buf: [*]u8, count: usize) isize;
-extern "c" fn write(fd: c_int, buf: [*]const u8, count: usize) isize;
-extern "c" fn close(fd: c_int) c_int;
-extern "c" fn unlink(path: [*:0]const u8) c_int;
-extern "c" fn getpid() c_int;
-
-const ReadError = error{ CannotRead, OutOfMemory };
-
-fn readWholeFile(gpa: std.mem.Allocator, path: []const u8) ReadError![]u8 {
-    var path_z_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const path_z = std.fmt.bufPrintZ(&path_z_buf, "{s}", .{path}) catch return error.CannotRead;
-
-    const fd = open(path_z.ptr, 0); // O_RDONLY
-    if (fd < 0) return error.CannotRead;
-    defer _ = close(fd);
-
-    var out: std.ArrayList(u8) = .empty;
-    errdefer out.deinit(gpa);
-    var chunk: [65536]u8 = undefined;
-    while (true) {
-        const n = read(fd, &chunk, chunk.len);
-        if (n <= 0) break; // EOF or error: keep what we have
-        try out.appendSlice(gpa, chunk[0..@intCast(n)]);
-    }
-    return out.toOwnedSlice(gpa);
-}
-
 fn joinPath(buf: []u8, dir: []const u8, name: []const u8, suffix: []const u8) ?[]const u8 {
     return std.fmt.bufPrint(buf, "{s}/{s}{s}", .{ dir, name, suffix }) catch null;
 }
@@ -228,17 +198,8 @@ fn printStderr(io: std.Io, msg: []const u8) void {
 
 // --- test-only helpers -------------------------------------------------------
 
-fn writeAll(fd: c_int, bytes: []const u8) void {
-    var off: usize = 0;
-    while (off < bytes.len) {
-        const n = write(fd, bytes.ptr + off, bytes.len - off);
-        if (n <= 0) unreachable;
-        off += @intCast(n);
-    }
-}
-
 fn testPath(buf: []u8, suffix: []const u8) [*:0]u8 {
-    return std.fmt.bufPrintZ(buf, "/tmp/rec-cut-test-{d}{s}", .{ getpid(), suffix }) catch unreachable;
+    return wav.testPath(buf, suffix);
 }
 
 /// Canonical 44-byte PCM WAV header + `data_bytes` of a square wave.
@@ -309,22 +270,18 @@ test "cutIntervalFile replaces the recording with the cut" {
     // A 0.4 s WAV; the cut removes [0.1, 0.3] → 0.2 s remains.
     var path_buf: [96]u8 = undefined;
     const path = testPath(&path_buf, ".wav");
-    defer _ = unlink(path);
+    defer wav.unlinkZ(path);
     var m4a_buf: [96]u8 = undefined;
     const m4a_path = testPath(&m4a_buf, ".m4a");
-    defer _ = unlink(m4a_path);
+    defer wav.unlinkZ(m4a_path);
     var tmp_buf: [112]u8 = undefined;
     const tmp_path = testPath(&tmp_buf, ".m4a.cut.tmp");
-    defer _ = unlink(tmp_path);
+    defer wav.unlinkZ(tmp_path);
 
     var wav_image: std.ArrayList(u8) = .empty;
     defer wav_image.deinit(gpa);
     try testWav(&wav_image, gpa, 48000 * 2 * 2 * 4 / 10); // 0.4 s
-    {
-        const fd = open(path, wav.create_write_flags, @as(c_uint, 0o644));
-        defer _ = close(fd);
-        writeAll(fd, wav_image.items);
-    }
+    if (!wav.writeFileZ(path, wav_image.items)) unreachable;
 
     try cutIntervalFile(io, gpa, std.mem.sliceTo(path, 0), 0.1, 0.3);
 
@@ -338,7 +295,7 @@ test "cutIntervalFile replaces the recording with the cut" {
         try std.testing.expect(@abs(d - 0.2) < 0.05);
     } else {
         // The .wav is cut in place: same path, 0.2 s of PCM left.
-        const image = try readWholeFile(gpa, std.mem.sliceTo(path, 0));
+        const image = try wav.readWholeFile(gpa, std.mem.sliceTo(path, 0));
         defer gpa.free(image);
         try std.testing.expectEqual(
             @as(usize, 48000 * 2 * 2 * 2 / 10),
@@ -361,10 +318,10 @@ test "cutIntervalFile cuts an m4a in place" {
     // Encode 0.4 s of silence, then cut [0.1, 0.3] out of it.
     var path_buf: [96]u8 = undefined;
     const path = testPath(&path_buf, ".m4a");
-    defer _ = unlink(path);
+    defer wav.unlinkZ(path);
     var tmp_buf: [112]u8 = undefined;
     const tmp_path = testPath(&tmp_buf, ".m4a.cut.tmp");
-    defer _ = unlink(tmp_path);
+    defer wav.unlinkZ(tmp_path);
 
     const pcm = try gpa.alloc(u8, 48000 * 2 * 2 * 4 / 10); // 0.4 s of silence
     defer gpa.free(pcm);
@@ -390,23 +347,19 @@ test "cutIntervalFile refuses spans that cut nothing" {
     // An inverted span on a valid recording: nothing to cut, file untouched.
     var path_buf: [96]u8 = undefined;
     const path = testPath(&path_buf, ".wav");
-    defer _ = unlink(path);
+    defer wav.unlinkZ(path);
 
     var wav_image: std.ArrayList(u8) = .empty;
     defer wav_image.deinit(gpa);
     try testWav(&wav_image, gpa, 48000 * 2 * 2 * 4 / 10); // 0.4 s
-    {
-        const fd = open(path, wav.create_write_flags, @as(c_uint, 0o644));
-        defer _ = close(fd);
-        writeAll(fd, wav_image.items);
-    }
+    if (!wav.writeFileZ(path, wav_image.items)) unreachable;
 
     try std.testing.expectError(
         error.NothingToCut,
         cutIntervalFile(io, gpa, std.mem.sliceTo(path, 0), 0.3, 0.1),
     );
     // The file is intact: the same 0.4 s of PCM.
-    const image = try readWholeFile(gpa, std.mem.sliceTo(path, 0));
+    const image = try wav.readWholeFile(gpa, std.mem.sliceTo(path, 0));
     defer gpa.free(image);
     try std.testing.expectEqual(@as(usize, 48000 * 2 * 2 * 4 / 10), wav.parseWav(image).?.pcm.len);
 }
@@ -417,12 +370,8 @@ test "cutIntervalFile rejects audio it cannot decode" {
 
     var path_buf: [96]u8 = undefined;
     const path = testPath(&path_buf, ".txt");
-    defer _ = unlink(path);
-    {
-        const fd = open(path, wav.create_write_flags, @as(c_uint, 0o644));
-        defer _ = close(fd);
-        writeAll(fd, "not audio");
-    }
+    defer wav.unlinkZ(path);
+    if (!wav.writeFileZ(path, "not audio")) unreachable;
 
     try std.testing.expectError(
         error.CannotDecode,

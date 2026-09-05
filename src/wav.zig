@@ -5,6 +5,7 @@
 //! stance.
 
 const std = @import("std");
+const builtin = @import("builtin");
 
 pub const Error = error{
     CreateFailed,
@@ -13,13 +14,20 @@ pub const Error = error{
     InvalidPcm,
 };
 
+const is_windows = builtin.os.tag == .windows;
+
 /// O_WRONLY | O_CREAT | O_TRUNC, spelled through std.posix because the octal
-/// differs between macOS (0x601) and Linux (0o1101).
-pub const create_write_flags: c_int = @bitCast(std.posix.O{
-    .ACCMODE = .WRONLY,
-    .CREAT = true,
-    .TRUNC = true,
-});
+/// differs between macOS (0x601) and Linux (0o1101). Windows routes through
+/// the CRT's _open flags — _O_BINARY is what stops the CRT from rewriting
+/// \n bytes and corrupting the PCM body.
+pub const create_write_flags: c_int = if (is_windows)
+    0x0001 | 0x0100 | 0x0200 | 0x8000 // _O_WRONLY | _O_CREAT | _O_TRUNC | _O_BINARY
+else
+    @bitCast(std.posix.O{
+        .ACCMODE = .WRONLY,
+        .CREAT = true,
+        .TRUNC = true,
+    });
 
 /// Writes the canonical 44-byte PCM16 header for `data_bytes` of audio.
 fn writeHeader(buf: *[44]u8, sample_rate: u32, channels: u16, data_bytes: u32) void {
@@ -53,9 +61,9 @@ pub const Encoder = struct {
 
         var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
         const path_z = std.fmt.bufPrintZ(&path_buf, "{s}", .{path}) catch return error.CreateFailed;
-        const fd = open(path_z.ptr, create_write_flags, @as(c_uint, 0o644));
+        const fd = openNew(path_z.ptr);
         if (fd < 0) return error.CreateFailed;
-        errdefer _ = close(fd);
+        errdefer _ = cclose(fd);
 
         var header: [44]u8 = undefined;
         writeHeader(&header, sample_rate, @intCast(channels), 0); // patched by finish
@@ -81,18 +89,18 @@ pub const Encoder = struct {
 
         var patch: [4]u8 = undefined;
         std.mem.writeInt(u32, &patch, 36 + data_bytes, .little);
-        if (pwrite(self.fd, &patch, 4, 4) != 4) return error.FinalizeFailed;
+        if (cpwrite(self.fd, &patch, 4) != 4) return error.FinalizeFailed;
         std.mem.writeInt(u32, &patch, data_bytes, .little);
-        if (pwrite(self.fd, &patch, 4, 40) != 4) return error.FinalizeFailed;
+        if (cpwrite(self.fd, &patch, 40) != 4) return error.FinalizeFailed;
 
-        if (close(self.fd) != 0) return error.FinalizeFailed;
+        if (cclose(self.fd) != 0) return error.FinalizeFailed;
     }
 
     /// Closes an unfinished encoder without making its file valid.
     pub fn abort(self: *Encoder) void {
         if (self.closed) return;
         self.closed = true;
-        _ = close(self.fd);
+        _ = cclose(self.fd);
     }
 };
 
@@ -149,48 +157,147 @@ pub fn parseWav(image: []const u8) ?Wav {
     return .{ .pcm = pcm, .sample_rate = sample_rate, .channels = channels };
 }
 
-// libc file I/O (libc is already linked for miniaudio): a plain fd with the
-// lifetime exactly ours to manage, like the rest of the format modules.
+// libc file I/O (libc is already linked for miniaudio; the CRT spellings on
+// Windows): a plain fd with the lifetime exactly ours to manage, like the
+// rest of the format modules.
 
 extern "c" fn open(path: [*:0]const u8, oflag: c_int, ...) c_int;
+extern "c" fn _open(path: [*:0]const u8, oflag: c_int, ...) c_int;
 extern "c" fn write(fd: c_int, buf: [*]const u8, count: usize) isize;
+extern "c" fn _write(fd: c_int, buf: [*]const u8, count: u32) c_int;
 extern "c" fn pwrite(fd: c_int, buf: [*]const u8, count: usize, offset: c_long) isize;
+extern "c" fn _lseeki64(fd: c_int, offset: i64, origin: c_int) i64;
 extern "c" fn read(fd: c_int, buf: [*]u8, count: usize) isize;
+extern "c" fn _read(fd: c_int, buf: [*]u8, count: u32) c_int;
 extern "c" fn close(fd: c_int) c_int;
+extern "c" fn _close(fd: c_int) c_int;
 extern "c" fn unlink(path: [*:0]const u8) c_int;
+extern "c" fn _unlink(path: [*:0]const u8) c_int;
 extern "c" fn getpid() c_int;
+extern "c" fn _getpid() c_int;
+
+const seek_set: c_int = 0;
+const seek_cur: c_int = 1;
+
+fn openNew(path: [*:0]const u8) c_int {
+    if (is_windows) return _open(path, create_write_flags, @as(c_uint, 0o600)); // _S_IREAD|_S_IWRITE
+    return open(path, create_write_flags, @as(c_uint, 0o644));
+}
+
+fn openReadOnly(path: [*:0]const u8) c_int {
+    if (is_windows) return _open(path, 0); // _O_RDONLY
+    return open(path, 0);
+}
+
+fn cclose(fd: c_int) c_int {
+    if (is_windows) return _close(fd);
+    return close(fd);
+}
+
+fn cwrite(fd: c_int, bytes: []const u8) isize {
+    if (is_windows) return _write(fd, bytes.ptr, @intCast(bytes.len));
+    return write(fd, bytes.ptr, bytes.len);
+}
+
+fn cread(fd: c_int, buf: []u8) isize {
+    if (is_windows) return _read(fd, buf.ptr, @intCast(buf.len));
+    return read(fd, buf.ptr, buf.len);
+}
+
+/// The one CRT gap: no _pwrite on Windows, so patching is seek, write, seek
+/// back — the header patches run before close, racing nothing.
+fn cpwrite(fd: c_int, bytes: []const u8, offset: u64) isize {
+    if (is_windows) {
+        const pos = _lseeki64(fd, 0, seek_cur);
+        _ = _lseeki64(fd, @bitCast(offset), seek_set);
+        const n = cwrite(fd, bytes);
+        _ = _lseeki64(fd, pos, seek_set);
+        return n;
+    }
+    return pwrite(fd, bytes.ptr, bytes.len, @intCast(offset));
+}
 
 fn writeAll(fd: c_int, bytes: []const u8) !void {
     var off: usize = 0;
     while (off < bytes.len) {
-        const n = write(fd, bytes.ptr + off, bytes.len - off);
+        const end = @min(off + (1 << 30), bytes.len); // bounded for _write's u32
+        const n = cwrite(fd, bytes[off..end]);
         if (n <= 0) return error.WriteFailed;
         off += @intCast(n);
     }
 }
 
-/// Test-only: a plain read() into owned memory.
-fn readWholeFile(gpa: std.mem.Allocator, path: [*:0]const u8) ![]u8 {
-    const fd = open(path, 0); // O_RDONLY
+pub const ReadError = error{ CannotRead, OutOfMemory };
+
+/// The whole file at `path` as owned memory — the reader side of the format
+/// plumbing, shared with cut.zig's WAV loading.
+pub fn readWholeFile(gpa: std.mem.Allocator, path: []const u8) ReadError![]u8 {
+    var path_z_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path_z = std.fmt.bufPrintZ(&path_z_buf, "{s}", .{path}) catch return error.CannotRead;
+
+    const fd = openReadOnly(path_z.ptr);
     if (fd < 0) return error.CannotRead;
-    defer _ = close(fd);
+    defer _ = cclose(fd);
 
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(gpa);
     var chunk: [65536]u8 = undefined;
     while (true) {
-        const n = read(fd, &chunk, chunk.len);
+        const n = cread(fd, &chunk);
         if (n <= 0) break; // EOF or error: keep what we have
         try out.appendSlice(gpa, chunk[0..@intCast(n)]);
     }
     return out.toOwnedSlice(gpa);
 }
 
-// --- tests -------------------------------------------------------------------
+// --- test-only file plumbing (cut.zig's tests share it) ----------------------
 
-fn testPath(buf: []u8, suffix: []const u8) [*:0]u8 {
-    return std.fmt.bufPrintZ(buf, "/tmp/rec-wav-test-{d}{s}", .{ getpid(), suffix }) catch unreachable;
+/// Creates (or truncates) the file at `path_z` and writes `bytes` into it.
+pub fn writeFileZ(path_z: [*:0]const u8, bytes: []const u8) bool {
+    const fd = openNew(path_z);
+    if (fd < 0) return false;
+    writeAll(fd, bytes) catch {
+        _ = cclose(fd);
+        return false;
+    };
+    return cclose(fd) == 0;
 }
+
+/// Best-effort unlink for test cleanup.
+pub fn unlinkZ(path_z: [*:0]const u8) void {
+    if (is_windows) {
+        _ = _unlink(path_z);
+    } else {
+        _ = unlink(path_z);
+    }
+}
+
+extern "c" fn getenv(name: [*:0]const u8) ?[*:0]const u8;
+
+fn envStr(name: [*:0]const u8) ?[]const u8 {
+    const v = getenv(name) orelse return null;
+    if (v[0] == 0) return null;
+    return std.mem.span(v);
+}
+
+fn testDir() ?[]const u8 {
+    if (envStr("TMPDIR")) |d| return d;
+    if (is_windows) {
+        if (envStr("TEMP")) |d| return d;
+        if (envStr("TMP")) |d| return d;
+    }
+    return null;
+}
+
+/// Scratch path for test artifacts (created and unlinked by the same test):
+/// the platform temp dir when the environment exports one, else the working
+/// directory. `buf` must be max_path_bytes and holds the returned bytes.
+pub fn testPath(buf: []u8, suffix: []const u8) [*:0]u8 {
+    const pid = if (is_windows) _getpid() else getpid();
+    return std.fmt.bufPrintZ(buf, "{s}/rec-wav-test-{d}{s}", .{ testDir() orelse ".", pid, suffix }) catch unreachable;
+}
+
+// --- tests -------------------------------------------------------------------
 
 /// The 0.5 s 48 kHz stereo square wave shared by the encoder tests.
 fn testSquareWave(gpa: std.mem.Allocator) !std.ArrayList(u8) {
@@ -213,7 +320,7 @@ fn testSquareWave(gpa: std.mem.Allocator) !std.ArrayList(u8) {
 }
 
 test "encode writes a WAV whose parse reads the exact audio back" {
-    var path_buf: [64]u8 = undefined;
+    var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const path = testPath(&path_buf, ".wav");
     defer _ = unlink(path);
 
@@ -223,7 +330,7 @@ test "encode writes a WAV whose parse reads the exact audio back" {
     try encode(std.mem.sliceTo(path, 0), pcm.items, 48000, 2);
 
     // WAV is lossless: the parsed payload is the source PCM, byte for byte.
-    const image = try readWholeFile(std.testing.allocator, path);
+    const image = try readWholeFile(std.testing.allocator, std.mem.sliceTo(path, 0));
     defer std.testing.allocator.free(image);
     const parsed = parseWav(image).?;
     try std.testing.expectEqual(@as(u32, 48000), parsed.sample_rate);
@@ -232,7 +339,7 @@ test "encode writes a WAV whose parse reads the exact audio back" {
 }
 
 test "stream encoder finalizes a recording written in chunks" {
-    var path_buf: [64]u8 = undefined;
+    var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const path = testPath(&path_buf, ".stream.wav");
     defer _ = unlink(path);
 
@@ -246,13 +353,13 @@ test "stream encoder finalizes a recording written in chunks" {
     try encoder.write(pcm.items[midpoint..]);
     try encoder.finish();
 
-    const image = try readWholeFile(std.testing.allocator, path);
+    const image = try readWholeFile(std.testing.allocator, std.mem.sliceTo(path, 0));
     defer std.testing.allocator.free(image);
     try std.testing.expectEqualSlices(u8, pcm.items, parseWav(image).?.pcm);
 }
 
 test "finish rejects bodies past the 4 GiB RIFF limit" {
-    var path_buf: [64]u8 = undefined;
+    var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const path = testPath(&path_buf, ".huge.wav");
     defer _ = unlink(path);
 
@@ -263,14 +370,14 @@ test "finish rejects bodies past the 4 GiB RIFF limit" {
 }
 
 test "parseWav finds the data chunk and layout" {
-    var path_buf: [64]u8 = undefined;
+    var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const path = testPath(&path_buf, ".parse.wav");
     defer _ = unlink(path);
 
     var pcm = try testSquareWave(std.testing.allocator);
     defer pcm.deinit(std.testing.allocator);
     try encode(std.mem.sliceTo(path, 0), pcm.items, 48000, 2);
-    const image = try readWholeFile(std.testing.allocator, path);
+    const image = try readWholeFile(std.testing.allocator, std.mem.sliceTo(path, 0));
     defer std.testing.allocator.free(image);
 
     const parsed = parseWav(image).?;

@@ -113,26 +113,9 @@ pub fn recordOnce(
 
     // One raw read per keystroke; the cooked terminal comes back whatever
     // way the loop ends.
-    var cooked: ?std.posix.termios = null;
-    if (keys_tty) {
-        cooked = std.posix.tcgetattr(0) catch null;
-        if (cooked) |ck| {
-            var raw = ck;
-            raw.lflag.ICANON = false; // one key at a time
-            raw.lflag.ECHO = false; // we echo manually
-            raw.lflag.ISIG = false; // Ctrl-C arrives as a byte we handle
-            raw.lflag.IEXTEN = false;
-            raw.iflag.IXON = false; // Ctrl-S/Q must not freeze the terminal
-            raw.cc[@intFromEnum(std.posix.V.MIN)] = 1;
-            raw.cc[@intFromEnum(std.posix.V.TIME)] = 0;
-            std.posix.tcsetattr(0, .NOW, raw) catch {
-                cooked = null;
-            };
-        }
-    }
-    defer if (cooked) |ck| {
-        std.posix.tcsetattr(0, .FLUSH, ck) catch {};
-    };
+    var cooked: ?keys.Cooked = null;
+    if (keys_tty) cooked = keys.enableRaw();
+    defer if (cooked) |ck| keys.restoreRaw(ck);
 
     const started_at = std.Io.Timestamp.now(io, .awake);
     const duration_ns: ?i128 = if (duration_sec) |sec| durationNanoseconds(sec) else null;
@@ -280,6 +263,9 @@ fn onSigint(sig: std.posix.SIG) callconv(.c) void {
 }
 
 fn installSigintHandler() void {
+    // Windows has no SIGINT for console apps; Ctrl-C arrives as the 0x03
+    // key byte (VT input) and the loop breaks on it like on ESC.
+    if (@import("builtin").os.tag == .windows) return;
     const act = std.posix.Sigaction{
         .handler = .{ .handler = onSigint },
         .mask = std.posix.sigemptyset(),
@@ -306,12 +292,24 @@ const Tm = extern struct {
 
 extern "c" fn time(now: ?*i64) i64;
 extern "c" fn localtime_r(now: *const i64, result: *Tm) ?*Tm;
+// Windows CRT: no _r functions — localtime fills a static buffer (fine;
+// the record loop is single-threaded around this call).
+extern "c" fn localtime(now: *const i64) ?*Tm;
+
+fn localTime(now: *const i64, out: *Tm) bool {
+    if (@import("builtin").os.tag == .windows) {
+        const t = localtime(now) orelse return false;
+        out.* = t.*;
+        return true;
+    }
+    return localtime_r(now, out) != null;
+}
 
 /// "YYYYMMDD-HHMMSS" (15 bytes) from the local wall clock.
 fn localTimestamp(out: *[15]u8) void {
     const now: i64 = time(null);
     var tm: Tm = undefined;
-    if (localtime_r(&now, &tm) == null) {
+    if (!localTime(&now, &tm)) {
         @memcpy(out, "19700101-000000");
         return;
     }

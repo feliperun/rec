@@ -31,7 +31,10 @@ pub fn main(init: std.process.Init) u8 {
 
     var args: std.ArrayList([:0]const u8) = .empty;
     defer args.deinit(init.gpa);
-    var args_it = std.process.Args.Iterator.init(init.minimal.args);
+    var args_it = std.process.Args.Iterator.initAllocator(init.minimal.args, init.gpa) catch {
+        printStderr(io, "out of memory\n");
+        return 1;
+    };
     defer args_it.deinit();
     while (args_it.next()) |arg| {
         args.append(init.gpa, arg) catch {
@@ -40,7 +43,11 @@ pub fn main(init: std.process.Init) u8 {
         };
     }
 
-    const home_dir: []const u8 = init.minimal.environ.getPosix("HOME") orelse "";
+    // getAlloc works on every platform (USERPROFILE on Windows); a missing
+    // or unreadable variable degrades to "" and the library path fails with
+    // its own message. The value intentionally lives for the whole run.
+    const home_var: []const u8 = if (@import("builtin").os.tag == .windows) "USERPROFILE" else "HOME";
+    const home_dir: []const u8 = init.minimal.environ.getAlloc(init.gpa, home_var) catch "";
 
     var recordings_path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const recordings_path = library.homeRecordingsPath(home_dir, &recordings_path_buf) orelse {
@@ -91,7 +98,7 @@ pub fn main(init: std.process.Init) u8 {
             io,
             init.gpa,
             rest,
-            init.minimal.environ.getPosix("DEEPGRAM_API_KEY"),
+            init.minimal.environ.getAlloc(init.gpa, "DEEPGRAM_API_KEY") catch null,
             home_dir,
             recordings_path,
         );

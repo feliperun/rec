@@ -1,5 +1,7 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const capture = @import("capture.zig");
+const keys = @import("keys.zig");
 const library = @import("library.zig");
 const playback = @import("playback.zig");
 const record = @import("record.zig");
@@ -7,9 +9,9 @@ const style = @import("style.zig");
 
 /// Set by the SIGINT handler while the interactive loop owns the terminal.
 var g_sigint = std.atomic.Value(bool).init(false);
-/// The cooked termios to restore from the handler and the exit defer;
-/// non-null exactly while raw mode is on.
-var g_cooked: ?std.posix.termios = null;
+/// The cooked terminal state to restore from the handler and the exit
+/// defer; non-null exactly while raw mode is on.
+var g_cooked: ?keys.Cooked = null;
 
 fn onSigint(sig: std.posix.SIG) callconv(.c) void {
     _ = sig;
@@ -17,16 +19,26 @@ fn onSigint(sig: std.posix.SIG) callconv(.c) void {
     capture.requestStop(); // stops an in-flight recording under this handler
     // Give the terminal back immediately; tcsetattr is a plain ioctl, safe
     // to call from a handler. The exit defer repeats this on the normal path.
-    if (g_cooked) |t| std.posix.tcsetattr(0, .FLUSH, t) catch {};
+    if (g_cooked) |t| keys.restoreRaw(t);
 }
 
+var g_old_act: std.posix.Sigaction = undefined;
+
 fn installHandler() void {
+    // Windows has no SIGINT for console apps; Ctrl-C arrives as the 0x03
+    // key byte, which the menu handles.
+    if (builtin.os.tag == .windows) return;
     const act = std.posix.Sigaction{
         .handler = .{ .handler = onSigint },
         .mask = std.posix.sigemptyset(),
         .flags = 0,
     };
-    std.posix.sigaction(std.posix.SIG.INT, &act, null);
+    std.posix.sigaction(std.posix.SIG.INT, &act, &g_old_act);
+}
+
+fn restoreHandler() void {
+    if (builtin.os.tag == .windows) return;
+    std.posix.sigaction(std.posix.SIG.INT, &g_old_act, null);
 }
 
 const NextKey = union(enum) {
@@ -38,61 +50,34 @@ const NextKey = union(enum) {
 /// Waits up to 200 ms for a keystroke so the SIGINT flag is noticed even
 /// while idle.
 fn nextKey() NextKey {
-    var fds = [_]std.posix.pollfd{.{
-        .fd = 0,
-        .events = std.posix.POLL.IN,
-        .revents = undefined,
-    }};
-    const ready = std.posix.poll(&fds, 200) catch return .none;
-    if (ready == 0) return .none;
-    var buf: [1]u8 = undefined;
-    const n = std.posix.read(0, &buf) catch return .none;
-    if (n == 0) return .eof;
-    return .{ .key = buf[0] };
+    var b: u8 = 0;
+    if (!keys.waitReadable(200)) return .none;
+    if (!keys.readByte(&b)) return .eof;
+    return .{ .key = b };
 }
 
 /// Interactive menu: raw-mode key loop over the record/list/play commands.
 /// The cooked terminal state comes back via the defer and the SIGINT
 /// handler, so the shell is never left broken.
 pub fn runInteractive(io: std.Io, gpa: std.mem.Allocator, recordings_path: []const u8) u8 {
-    // isTty first: tcgetattr on a non-tty can trip "unexpected errno" dumps
-    // (macOS reports ENODEV for /dev/null) for what is an ordinary failure.
+    // isTty first: probing raw mode on a non-tty can trip "unexpected errno"
+    // dumps (macOS reports ENODEV for /dev/null) for what is an ordinary
+    // failure.
     const is_tty = std.Io.File.stdin().isTty(io) catch false;
-    const maybe_cooked: ?std.posix.termios = if (is_tty) (std.posix.tcgetattr(0) catch null) else null;
+    const maybe_cooked: ?keys.Cooked = if (is_tty) keys.enableRaw() else null;
     const cooked = maybe_cooked orelse {
         printStderr(io, "interactive mode needs a terminal on stdin\n");
         return 1;
     };
 
     // Handler first: from here on a Ctrl-C puts the terminal back for us.
-    var old_act: std.posix.Sigaction = undefined;
-    const act = std.posix.Sigaction{
-        .handler = .{ .handler = onSigint },
-        .mask = std.posix.sigemptyset(),
-        .flags = 0,
-    };
-    std.posix.sigaction(std.posix.SIG.INT, &act, &old_act);
-
-    var raw = cooked;
-    raw.lflag.ICANON = false; // one key at a time
-    raw.lflag.ECHO = false; // we echo manually
-    raw.lflag.IEXTEN = false;
-    raw.iflag.IXON = false; // Ctrl-S/Q must not freeze the terminal
-    raw.cc[@intFromEnum(std.posix.V.MIN)] = 1;
-    raw.cc[@intFromEnum(std.posix.V.TIME)] = 0;
-    // .NOW (not .FLUSH): keystrokes that arrived before raw mode was on stay
-    // in the input queue instead of being discarded as typeahead.
-    std.posix.tcsetattr(0, .NOW, raw) catch {
-        std.posix.sigaction(std.posix.SIG.INT, &old_act, null);
-        printStderr(io, "interactive mode cannot enter raw mode\n");
-        return 1;
-    };
+    installHandler();
     g_cooked = cooked;
 
     defer {
-        std.posix.tcsetattr(0, .FLUSH, cooked) catch {};
+        keys.restoreRaw(cooked);
         g_cooked = null;
-        std.posix.sigaction(std.posix.SIG.INT, &old_act, null);
+        restoreHandler();
     }
 
     var banner_buf: [128]u8 = undefined;

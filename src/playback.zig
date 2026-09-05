@@ -19,6 +19,9 @@ fn onSigint(sig: std.posix.SIG) callconv(.c) void {
 }
 
 fn installSigint() void {
+    // Windows has no SIGINT for console apps; Ctrl-C arrives as the 0x03
+    // key byte (VT input), which the loop breaks on.
+    if (@import("builtin").os.tag == .windows) return;
     const act = std.posix.Sigaction{
         .handler = .{ .handler = onSigint },
         .mask = std.posix.sigemptyset(),
@@ -162,27 +165,14 @@ fn playInteractive(
     recordings_path: []const u8,
 ) u8 {
     var duration_sec = duration_sec_in;
-    const cooked = std.posix.tcgetattr(0) catch {
+    const cooked = keys.enableRaw() orelse {
         // Raw mode is unavailable (odd terminal); degrade to plain playback.
         printStderr(io, "Playing ");
         printStderr(io, name);
         printStderr(io, " (Ctrl-C to stop)\n");
         return playBlocking(io, audio.pcm, audio.sample_rate, audio.channels);
     };
-
-    var raw = cooked;
-    raw.lflag.ICANON = false; // one key at a time
-    raw.lflag.ECHO = false; // we echo manually
-    raw.lflag.ISIG = false; // Ctrl-C arrives as a byte we handle ourselves
-    raw.lflag.IEXTEN = false;
-    raw.iflag.IXON = false; // Ctrl-S/Q must not freeze the terminal
-    raw.cc[@intFromEnum(std.posix.V.MIN)] = 1;
-    raw.cc[@intFromEnum(std.posix.V.TIME)] = 0;
-    std.posix.tcsetattr(0, .NOW, raw) catch {
-        printStderr(io, "play: cannot enter raw mode\n");
-        return 1;
-    };
-    defer std.posix.tcsetattr(0, .FLUSH, cooked) catch {};
+    defer keys.restoreRaw(cooked);
 
     installSigint();
 

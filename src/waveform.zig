@@ -254,10 +254,34 @@ extern "c" fn ioctl(fd: c_int, request: c_ulong, ...) c_int;
 /// TIOCGWINSZ on macOS.
 const tiocgwinsz: c_ulong = 0x40087468;
 
+/// Windows console geometry (kernel32; stderr's visible window is what a
+/// grid is drawn against).
+const Coord = extern struct { x: i16, y: i16 };
+const SmallRect = extern struct { left: i16, top: i16, right: i16, bottom: i16 };
+const ConsoleScreenBufferInfo = extern struct {
+    dw_size: Coord,
+    dw_cursor_position: Coord,
+    w_attributes: u16,
+    sr_window: SmallRect,
+    dw_maximum_window_size: Coord,
+};
+extern "kernel32" fn GetStdHandle(nStdHandle: i32) ?std.os.windows.HANDLE;
+extern "kernel32" fn GetConsoleScreenBufferInfo(hConsoleOutput: std.os.windows.HANDLE, info: *ConsoleScreenBufferInfo) i32;
+const std_output_handle: i32 = -11;
+
 /// Columns available for a grid drawn on stderr; one column is kept in
 /// reserve so the lines do not wrap on terminals that auto-scroll, and 79
 /// is the fallback when the ioctl says nothing.
 pub fn termWidth() usize {
+    if (@import("builtin").os.tag == .windows) {
+        var info: ConsoleScreenBufferInfo = undefined;
+        const h = GetStdHandle(std_output_handle) orelse return 79;
+        if (GetConsoleScreenBufferInfo(h, &info) != 0) {
+            const cols: i32 = @as(i32, info.sr_window.right) - info.sr_window.left + 1;
+            if (cols >= 2) return @as(usize, @intCast(cols)) - 1;
+        }
+        return 79;
+    }
     var ws: Winsize = .{ .rows = 0, .cols = 0, .xpixel = 0, .ypixel = 0 };
     if (ioctl(2, tiocgwinsz, &ws) == 0 and ws.cols >= 2) return ws.cols - 1;
     return 79;
