@@ -111,12 +111,24 @@ pub fn run(
         return 1;
     };
 
-    const key = api_key orelse {
-        printStderr(io, "transcribe: DEEPGRAM_API_KEY is not set\n");
-        return 1;
-    };
+    // The environment wins; otherwise the key `rec setup` stored is what
+    // makes transcription work with no shell exports at all.
+    var key: []const u8 = "";
+    var stored_key: ?[]u8 = null;
+    defer if (stored_key) |sk| gpa.free(sk);
+    if (api_key) |k| {
+        if (k.len > 0) key = k;
+    }
     if (key.len == 0) {
-        printStderr(io, "transcribe: DEEPGRAM_API_KEY is not set\n");
+        var cfg_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        if (llm.configDirPath(home_dir, llm.envValue("XDG_CONFIG_HOME"), &cfg_buf)) |config_dir| {
+            stored_key = transcribe.loadStoredKey(io, gpa, config_dir);
+            if (stored_key) |sk| key = sk;
+        }
+    }
+    if (key.len == 0) {
+        printStderr(io, "transcribe: no Deepgram API key configured\n");
+        printStderr(io, "export DEEPGRAM_API_KEY or run `rec setup`\n");
         return 1;
     }
 

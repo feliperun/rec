@@ -1,4 +1,5 @@
 const std = @import("std");
+const wav = @import("wav.zig");
 
 /// System curl: the pinned absolute path on POSIX, the PATH one on Windows
 /// (System32 ships curl.exe and spawn resolves bare names from PATH).
@@ -253,6 +254,82 @@ const fixture_response =
     \\  }
     \\}
 ;
+
+// --- stored key -------------------------------------------------------------
+
+// --- stored key -------------------------------------------------------------
+
+/// The user's Deepgram key lives in its own file next to config.json:
+/// `rec setup` writes it (0600 where the OS honors modes), and `rec
+/// transcribe` reads it when the environment exports no DEEPGRAM_API_KEY.
+pub fn keyFilePath(buf: []u8, config_dir: []const u8) ?[]const u8 {
+    return std.fmt.bufPrint(buf, "{s}/deepgram_key", .{config_dir}) catch null;
+}
+
+/// The stored key, whitespace-trimmed; freshly allocated, null when nothing
+/// usable is stored.
+pub fn loadStoredKey(io: std.Io, gpa: std.mem.Allocator, config_dir: []const u8) ?[]u8 {
+    var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path = keyFilePath(&path_buf, config_dir) orelse return null;
+    const raw = std.Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(4096)) catch return null;
+    const trimmed = std.mem.trim(u8, raw, " \t\r\n");
+    if (trimmed.len == 0) {
+        gpa.free(raw);
+        return null;
+    }
+    const key = gpa.dupe(u8, trimmed) catch {
+        gpa.free(raw);
+        return null;
+    };
+    gpa.free(raw);
+    return key;
+}
+
+/// Persists the key (overwriting any previous one) and creates the config
+/// directory when missing. A trailing newline keeps `cat` output tidy; the
+/// loader trims it back off.
+pub fn storeKey(io: std.Io, gpa: std.mem.Allocator, config_dir: []const u8, key: []const u8) bool {
+    _ = gpa;
+    std.Io.Dir.cwd().createDirPath(io, config_dir) catch {};
+
+    var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path = keyFilePath(&path_buf, config_dir) orelse return false;
+    // 0600 on POSIX (the umask only subtracts, so the mode must be exact);
+    // Windows has no modes and ignores this.
+    const secret_mode: std.Io.File.Permissions = @enumFromInt(0o600);
+    var file = std.Io.Dir.cwd().createFile(io, path, .{ .truncate = true, .permissions = secret_mode }) catch return false;
+    defer file.close(io);
+    file.writeStreamingAll(io, key) catch return false;
+    file.writeStreamingAll(io, "\n") catch return false;
+    return true;
+}
+
+test "stored key round-trips trimmed and absent means null" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    const io = threaded.io();
+    const gpa = std.testing.allocator;
+
+    var dir_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const dir = std.mem.sliceTo(wav.testPath(&dir_buf, ".cfg"), 0);
+    defer std.Io.Dir.cwd().deleteDir(io, dir) catch {};
+
+    // Nothing stored yet: loading answers null instead of erroring.
+    try std.testing.expectEqual(@as(?[]u8, null), loadStoredKey(io, gpa, dir));
+
+    // A key with trailing whitespace round-trips trimmed; an overwrite wins.
+    try std.testing.expect(storeKey(io, gpa, dir, "sk-first\n"));
+    {
+        const key = (loadStoredKey(io, gpa, dir) orelse return error.TestUnexpectedResult);
+        defer gpa.free(key);
+        try std.testing.expectEqualStrings("sk-first", key);
+    }
+    try std.testing.expect(storeKey(io, gpa, dir, "sk-second"));
+    {
+        const key = (loadStoredKey(io, gpa, dir) orelse return error.TestUnexpectedResult);
+        defer gpa.free(key);
+        try std.testing.expectEqualStrings("sk-second", key);
+    }
+}
 
 test "parse extracts ordered utterances from a deepgram-shaped response" {
     const utts = try parseResponse(std.testing.allocator, fixture_response);
