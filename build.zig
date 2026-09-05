@@ -4,6 +4,17 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
+    // Zig locates Apple frameworks through the macOS SDK, but only probes it
+    // for the native target — an x86_64-macos build on an arm64 host finds no
+    // framework search paths at all. Hand every macOS target the sysroot.
+    var sdk_path: ?[]const u8 = null;
+    if (target.result.os.tag == .macos) {
+        if (std.zig.system.darwin.getSdk(b.graph.arena, b.graph.io, &target.result)) |sdk| {
+            b.sysroot = sdk;
+            sdk_path = sdk;
+        }
+    }
+
     const exe_mod = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
         .target = target,
@@ -22,6 +33,11 @@ pub fn build(b: *std.Build) void {
     // backends self-load at runtime (ALSA/WASAPI via dlopen), so the other
     // systems only need their base system libraries.
     if (target.result.os.tag == .macos) {
+        if (sdk_path) |sdk| {
+            // The sysroot alone leaves the framework search list empty on a
+            // non-native target; name the SDK's framework directory too.
+            exe_mod.addFrameworkPath(.{ .cwd_relative = b.fmt("{s}/System/Library/Frameworks", .{sdk}) });
+        }
         exe_mod.linkFramework("CoreFoundation", .{});
         exe_mod.linkFramework("CoreAudio", .{});
         exe_mod.linkFramework("AudioToolbox", .{});
