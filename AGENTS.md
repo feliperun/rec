@@ -109,6 +109,19 @@ file — keep appending.
   `CrashIfClientProvidedBogusAudioBufferList`. Hoist frees to function scope
   and keep the image alive for the whole scope that uses it. See [ADR 0007](docs/adr/0007-cut-marked-intervals-in-place.md)
   and `src/cut.zig`.
+- std's Windows rename (`Dir.renameAbsolute`) asks the kernel for
+  **POSIX rename semantics**, and `ACCESS_DENIED` never falls back to plain
+  `FileRenameInformation` — so renaming the **running executable** (active
+  image section) always fails, even though `MoveFileExW` handles it fine.
+  Self-replacement must go through `MoveFileExW` (see `src/update.zig`);
+  verify cross-platform file surgery on a real machine, CI runners can't
+  catch it.
+- **`cp zig-out/bin/rec*` on a Windows runner stages the PDB, not the exe**:
+  the glob matches `rec.exe` and `rec.pdb`, and pwsh's `Copy-Item` then
+  copies the last match under the artifact name — the v1.7.0/v1.8.0
+  `rec-windows-x64.exe` release assets were program databases. Copy the
+  exact binary per matrix column and execute the staged artifact before
+  upload (the `sanity` step in `.github/workflows/release.yml`).
 
 ---
 
