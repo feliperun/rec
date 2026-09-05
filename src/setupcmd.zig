@@ -1,6 +1,7 @@
 const std = @import("std");
 const keys = @import("keys.zig");
 const llm = @import("llm.zig");
+const transcribe = @import("transcribe.zig");
 
 const probe_prompt = "Responda exatamente: OK";
 
@@ -24,7 +25,9 @@ pub fn run(io: std.Io, gpa: std.mem.Allocator, home_dir: []const u8) u8 {
         return 1;
     };
 
-    printOut(io, "rec setup — processamento de transcrições por LLM\n\n");
+    askDeepgramKey(io, gpa, config_dir);
+
+    printOut(io, "\nrec setup — processamento de transcrições por LLM\n\n");
     printOut(io, "Procurando harnesses de agentes de código instalados e autenticados.\n");
     printOut(io, "Cada um recebe uma chamada real de teste; pode levar alguns segundos.\n");
 
@@ -101,6 +104,37 @@ pub fn run(io: std.Io, gpa: std.mem.Allocator, home_dir: []const u8) u8 {
             return 130;
         }
         return 0;
+    }
+}
+
+/// Asks once for the Deepgram key so `rec transcribe` works without any
+/// shell exports. Enter keeps whatever is configured; an environment key
+/// wins over the stored one and makes this step a no-op.
+fn askDeepgramKey(io: std.Io, gpa: std.mem.Allocator, config_dir: []const u8) void {
+    printOut(io, "\nA transcrição usa a API da Deepgram.\n");
+    if (llm.envValue("DEEPGRAM_API_KEY")) |k| {
+        if (k.len > 0) {
+            printOut(io, "DEEPGRAM_API_KEY já vem do ambiente; nada a configurar aqui.\n");
+            return;
+        }
+    }
+    const stored = transcribe.loadStoredKey(io, gpa, config_dir);
+    defer if (stored) |s| gpa.free(s);
+
+    printOut(io, "Cole sua Deepgram API key");
+    if (stored != null) printOut(io, " (Enter mantém a atual)");
+    printOut(io, " [https://console.deepgram.com]: ");
+
+    var line_buf: [256]u8 = undefined;
+    const line = readLine(&line_buf) orelse return;
+    const key = std.mem.trim(u8, line, " \t");
+    if (key.len == 0) return;
+    if (transcribe.storeKey(io, gpa, config_dir, key)) {
+        printOut(io, "Chave salva em ");
+        printOut(io, config_dir);
+        printOut(io, "/deepgram_key\n");
+    } else {
+        printOut(io, "Não consegui salvar a chave.\n");
     }
 }
 

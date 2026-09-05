@@ -1,5 +1,7 @@
 const std = @import("std");
 
+const zon = @import("build.zig.zon");
+
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
@@ -27,6 +29,12 @@ pub fn build(b: *std.Build) void {
         .flags = &.{},
     });
     exe_mod.addIncludePath(b.path("vendor"));
+
+    // The single version source: build.zig.zon, embedded as `build_info`
+    // so `rec about` shows it and auto-update compares it against releases.
+    const build_info = b.addOptions();
+    build_info.addOption([]const u8, "version", zon.version);
+    exe_mod.addOptions("build_info", build_info);
 
     // CoreAudio's frameworks exist (and are needed) only on macOS; the M4A
     // encoder is compiled out elsewhere (see src/recording.zig). miniaudio's

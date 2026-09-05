@@ -86,21 +86,22 @@ export DEEPSEEK_API_KEY=sk-...   # DeepSeek provider
 export ZAI_API_KEY=sk-...        # Z.AI GLM provider
 ```
 
-No key is ever written to disk: rec only reads it from the environment at
-the moment a call happens.
+Provider keys are never written to disk: rec only reads them from the
+environment at the moment a call happens.
 
 ## First run
 
 ```sh
-rec setup    # pick which coding-agent LLM processes your transcripts
+rec setup    # Deepgram key + pick which coding-agent LLM processes transcripts
 ```
 
-`rec setup` probes every installed harness with a genuine test call, shows
-only the usable ones, lists their available models where the harness can tell
-us, validates your exact harness+model pick once more, and saves it to
+`rec setup` first asks for your Deepgram API key (transcription) and stores
+it at `~/.config/rec/deepgram_key` — skip it if `DEEPGRAM_API_KEY` is
+already exported; the environment always wins over the stored key. It then
+probes every installed harness with a genuine test call, shows only the
+usable ones, lists their available models where the harness can tell us,
+validates your exact harness+model pick once more, and saves it to
 `~/.config/rec/config.json`. Run it again any time to switch.
-
-Requires `DEEPGRAM_API_KEY` in your environment for transcription itself.
 
 ## Usage
 
@@ -238,6 +239,27 @@ rec also asks which **provider** backs it:
 The choice is validated with a real call before it's saved to
 `~/.config/rec/config.json`; re-run `rec setup` anytime to switch. See
 [First run](#first-run) for the provider prerequisites.
+
+### about
+
+```sh
+rec about
+```
+
+Prints the version and the project page — bug reports, ideas, and pull
+requests are welcome.
+
+### update
+
+```sh
+rec update
+```
+
+Checks GitHub Releases for a newer build and replaces the running binary
+with this platform's asset; the new version takes effect on the next
+invocation. rec also checks on its own, silently, at most once a day before
+running any other command, and only speaks up when it updated itself — no
+network, no noise ([ADR 0014](docs/adr/0014-self-update-from-github-releases.md)).
 
 ### Interactive mode
 

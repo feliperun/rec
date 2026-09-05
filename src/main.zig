@@ -1,11 +1,13 @@
 const std = @import("std");
 const formatcmd = @import("formatcmd.zig");
 const library = @import("library.zig");
+const llm = @import("llm.zig");
 const playback = @import("playback.zig");
 const record = @import("record.zig");
 const setupcmd = @import("setupcmd.zig");
 const transcribecmd = @import("transcribecmd.zig");
 const tui = @import("tui.zig");
+const updater = @import("update.zig");
 
 const usage =
     \\Usage: rec [command]
@@ -21,10 +23,26 @@ const usage =
     \\                             Restructure a transcript with a prompt template (default: meeting)
     \\  setup                      Choose which coding-agent LLM processes transcripts
     \\                             (alias: configure-llm)
+    \\  about                      Show the project page and how to contribute
+    \\  update                     Update rec from GitHub Releases (auto-checked daily)
     \\
     \\With no command, enters interactive mode.
     \\
 ;
+
+// The single version source: build.zig.zon, embedded through build.zig's
+// build_info options (bumped by release-please on every release).
+const version = @import("build_info").version;
+
+const about_text = std.fmt.comptimePrint(
+    \\rec {s} — record. transcribe. understand.
+    \\https://github.com/feliperun/rec
+    \\
+    \\rec is free software (MIT) built by its users. Bug reports, ideas
+    \\and pull requests are welcome:
+    \\https://github.com/feliperun/rec/issues
+    \\
+, .{version});
 
 pub fn main(init: std.process.Init) u8 {
     const io = init.io;
@@ -64,6 +82,15 @@ pub fn main(init: std.process.Init) u8 {
 
     const cmd = args.items[1];
     const rest = args.items[2..];
+
+    // Silent self-update check: once a day, never during a recording or when
+    // `update` itself is running, and mute on every failure path.
+    if (!std.mem.eql(u8, cmd, "record") and !std.mem.eql(u8, cmd, "update")) {
+        var cfg_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        if (llm.configDirPath(home_dir, llm.envValue("XDG_CONFIG_HOME"), &cfg_buf)) |config_dir| {
+            updater.autoCheck(io, init.gpa, config_dir);
+        }
+    }
 
     if (std.mem.eql(u8, cmd, "record")) {
         const ra = parseRecordArgs(rest);
@@ -119,6 +146,23 @@ pub fn main(init: std.process.Init) u8 {
         return setupcmd.run(io, init.gpa, home_dir);
     }
 
+    if (std.mem.eql(u8, cmd, "about")) {
+        if (rest.len != 0) {
+            printStderr(io, usage);
+            return 1;
+        }
+        printStdout(io, about_text);
+        return 0;
+    }
+
+    if (std.mem.eql(u8, cmd, "update")) {
+        if (rest.len != 0) {
+            printStderr(io, usage);
+            return 1;
+        }
+        return updater.run(io, init.gpa);
+    }
+
     printStderr(io, usage);
     return 1;
 }
@@ -147,6 +191,10 @@ fn printStderr(io: std.Io, msg: []const u8) void {
     std.Io.File.writeStreamingAll(.stderr(), io, msg) catch {};
 }
 
+fn printStdout(io: std.Io, msg: []const u8) void {
+    std.Io.File.writeStreamingAll(.stdout(), io, msg) catch {};
+}
+
 test {
     if (@import("builtin").os.tag == .macos) _ = @import("m4a.zig");
     _ = @import("capture.zig");
@@ -162,6 +210,7 @@ test {
     _ = @import("style.zig");
     _ = @import("tui.zig");
     _ = @import("transcribecmd.zig");
+    _ = @import("update.zig");
     _ = @import("okf.zig");
     _ = @import("waveform.zig");
     _ = @import("cut.zig");
