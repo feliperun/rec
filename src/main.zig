@@ -21,10 +21,25 @@ const usage =
     \\                             Restructure a transcript with a prompt template (default: meeting)
     \\  setup                      Choose which coding-agent LLM processes transcripts
     \\                             (alias: configure-llm)
+    \\  about                      Show the project page and how to contribute
     \\
     \\With no command, enters interactive mode.
     \\
 ;
+
+// The single version source: build.zig.zon, embedded through build.zig's
+// build_info options (bumped by release-please on every release).
+const version = @import("build_info").version;
+
+const about_text = std.fmt.comptimePrint(
+    \\rec {s} — record. transcribe. understand.
+    \\https://github.com/feliperun/rec
+    \\
+    \\rec is free software (MIT) built by its users. Bug reports, ideas
+    \\and pull requests are welcome:
+    \\https://github.com/feliperun/rec/issues
+    \\
+, .{version});
 
 pub fn main(init: std.process.Init) u8 {
     const io = init.io;
@@ -119,6 +134,15 @@ pub fn main(init: std.process.Init) u8 {
         return setupcmd.run(io, init.gpa, home_dir);
     }
 
+    if (std.mem.eql(u8, cmd, "about")) {
+        if (rest.len != 0) {
+            printStderr(io, usage);
+            return 1;
+        }
+        printStdout(io, about_text);
+        return 0;
+    }
+
     printStderr(io, usage);
     return 1;
 }
@@ -145,6 +169,10 @@ fn parseRecordArgs(args: []const [:0]const u8) RecordArgs {
 
 fn printStderr(io: std.Io, msg: []const u8) void {
     std.Io.File.writeStreamingAll(.stderr(), io, msg) catch {};
+}
+
+fn printStdout(io: std.Io, msg: []const u8) void {
+    std.Io.File.writeStreamingAll(.stdout(), io, msg) catch {};
 }
 
 test {
