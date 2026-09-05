@@ -352,6 +352,8 @@ test "assetName matches the published artifact for the running platform" {
     try std.testing.expectEqualStrings(expected, name);
 }
 
+// Shaped like the real release body: one asset per supported platform, so
+// the platform-matched lookup works on every test runner.
 const fixture_body =
     \\{
     \\  "url": "https://api.github.com/repos/feliperun/rec/releases/1",
@@ -361,6 +363,18 @@ const fixture_body =
     \\    {
     \\      "name": "rec-macos-arm64",
     \\      "browser_download_url": "https://github.com/feliperun/rec/releases/download/v1.8.0/rec-macos-arm64"
+    \\    },
+    \\    {
+    \\      "name": "rec-macos-intel",
+    \\      "browser_download_url": "https://github.com/feliperun/rec/releases/download/v1.8.0/rec-macos-intel"
+    \\    },
+    \\    {
+    \\      "name": "rec-linux-x64",
+    \\      "browser_download_url": "https://github.com/feliperun/rec/releases/download/v1.8.0/rec-linux-x64"
+    \\    },
+    \\    {
+    \\      "name": "rec-linux-arm64",
+    \\      "browser_download_url": "https://github.com/feliperun/rec/releases/download/v1.8.0/rec-linux-arm64"
     \\    },
     \\    {
     \\      "name": "rec-windows-x64.exe",
