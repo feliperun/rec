@@ -1,5 +1,21 @@
 # Changelog
 
+## [1.7.0](https://github.com/feliperun/rec/compare/v1.6.0...v1.7.0) (2026-09-05)
+
+
+### Features
+
+* cross-platform CI matrix and release artifacts ([36c6329](https://github.com/feliperun/rec/commit/36c6329b3218d62833142671674349243b0593a0))
+* installers for macOS, Linux, and Windows ([ef8e1d8](https://github.com/feliperun/rec/commit/ef8e1d89494fbd7baa47cc88bf2f89b7351cdda1))
+* record wav on linux and windows, m4a stays macos-only ([3c47750](https://github.com/feliperun/rec/commit/3c47750ef4c272dcfde42dd4374a1601ef0a962f))
+* windows and linux builds with platform shims ([a031809](https://github.com/feliperun/rec/commit/a03180984a14318cffe1a736d5aeac1ce5a36544))
+
+
+### Bug Fixes
+
+* hand macOS targets the SDK sysroot and framework path ([2db8d8b](https://github.com/feliperun/rec/commit/2db8d8be1d8c39d25d86a9e4d54b638750935adc))
+* release the environ allocations main owns ([c962204](https://github.com/feliperun/rec/commit/c9622040a1dae4069f36d8ac2ec7c7d1d3c6f231))
+
 ## [1.6.0](https://github.com/feliperun/rec/compare/v1.5.0...v1.6.0) (2026-09-04)
 
 
