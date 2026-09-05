@@ -3,7 +3,6 @@ const capture = @import("capture.zig");
 const keys = @import("keys.zig");
 const library = @import("library.zig");
 const live = @import("live.zig");
-const m4a = @import("m4a.zig");
 const style = @import("style.zig");
 const waveform = @import("waveform.zig");
 
@@ -11,8 +10,9 @@ const waveform = @import("waveform.zig");
 const tick_ms = 100;
 
 /// The record command body, shared by the CLI and the interactive 'r' key:
-/// captures the microphone and encodes $HOME/recordings/YYYYMMDD-HHMMSS.m4a
-/// (AAC) until the duration elapses, Ctrl-C, or ESC. SPACE pauses and
+/// captures the microphone and encodes
+/// $HOME/recordings/YYYYMMDD-HHMMSS<library.recording.ext> (the platform recording
+/// format) until the duration elapses, Ctrl-C, or ESC. SPACE pauses and
 /// resumes — paused audio is dropped, so the recording keeps only what was
 /// played. On a terminal the live view (status + waveform grid) runs on the
 /// alternate screen. Returns the exit code.
@@ -37,7 +37,7 @@ pub fn recordOnce(
 
     var filename_buf: [19]u8 = undefined;
     @memcpy(filename_buf[0..15], &name);
-    @memcpy(filename_buf[15..19], ".m4a");
+    @memcpy(filename_buf[15..19], library.recording.ext);
     const filename = filename_buf[0..19];
 
     var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
@@ -52,7 +52,7 @@ pub fn recordOnce(
         return 1;
     };
     // A killed process can only leave this private work file behind; never
-    // expose it to the recording library as an M4A.
+    // expose it to the recording library as a recording.
     std.Io.Dir.cwd().deleteFile(io, temp_path) catch {};
 
     var rec = capture.Recorder.init(gpa);
@@ -98,9 +98,9 @@ pub fn recordOnce(
         printStderr(io, "\n");
     }
 
-    var encoder = m4a.Encoder.init(temp_path, rec.sample_rate, rec.channels) catch {
+    var encoder = library.recording.Encoder.init(temp_path, rec.sample_rate, rec.channels) catch {
         std.Io.Dir.cwd().deleteFile(io, temp_path) catch {};
-        result = .{ .failed = "record: failed to initialize M4A encoder\n" };
+        result = .{ .failed = "record: failed to initialize the " ++ library.recording.format_name ++ " encoder\n" };
         return 1;
     };
     var encoder_open = true;
@@ -113,26 +113,9 @@ pub fn recordOnce(
 
     // One raw read per keystroke; the cooked terminal comes back whatever
     // way the loop ends.
-    var cooked: ?std.posix.termios = null;
-    if (keys_tty) {
-        cooked = std.posix.tcgetattr(0) catch null;
-        if (cooked) |ck| {
-            var raw = ck;
-            raw.lflag.ICANON = false; // one key at a time
-            raw.lflag.ECHO = false; // we echo manually
-            raw.lflag.ISIG = false; // Ctrl-C arrives as a byte we handle
-            raw.lflag.IEXTEN = false;
-            raw.iflag.IXON = false; // Ctrl-S/Q must not freeze the terminal
-            raw.cc[@intFromEnum(std.posix.V.MIN)] = 1;
-            raw.cc[@intFromEnum(std.posix.V.TIME)] = 0;
-            std.posix.tcsetattr(0, .NOW, raw) catch {
-                cooked = null;
-            };
-        }
-    }
-    defer if (cooked) |ck| {
-        std.posix.tcsetattr(0, .FLUSH, ck) catch {};
-    };
+    var cooked: ?keys.Cooked = null;
+    if (keys_tty) cooked = keys.enableRaw();
+    defer if (cooked) |ck| keys.restoreRaw(ck);
 
     const started_at = std.Io.Timestamp.now(io, .awake);
     const duration_ns: ?i128 = if (duration_sec) |sec| durationNanoseconds(sec) else null;
@@ -231,7 +214,7 @@ const Outcome = union(enum) { none, saved: struct { dur_csec: u64, bytes: u64 },
 /// the caller can release its encoder-abort guard.
 fn publish(
     io: std.Io,
-    encoder: *m4a.Encoder,
+    encoder: *library.recording.Encoder,
     new_pcm: []const u8,
     dur_csec: u64,
     temp_path: []const u8,
@@ -239,22 +222,23 @@ fn publish(
     outcome: *Outcome,
 ) bool {
     encoder.write(new_pcm) catch {
-        outcome.* = .{ .failed = "record: failed to encode M4A audio\n" };
+        outcome.* = .{ .failed = "record: failed to encode " ++ library.recording.format_name ++ " audio\n" };
         return false;
     };
 
-    // Dispose flushes the moov atom. The public name is exposed only after
-    // that succeeds, so an interrupted run leaves no corrupt .m4a behind.
+    // The encoder's finish flushes any trailer the format needs. The public
+    // name is exposed only after that succeeds, so an interrupted run leaves
+    // no corrupt recording behind.
     encoder.finish() catch {
-        outcome.* = .{ .failed = "record: failed to finalize M4A audio\n" };
+        outcome.* = .{ .failed = "record: failed to finalize " ++ library.recording.format_name ++ " audio\n" };
         return false;
     };
     std.Io.Dir.rename(std.Io.Dir.cwd(), temp_path, std.Io.Dir.cwd(), path, io) catch {
-        outcome.* = .{ .failed = "record: failed to save M4A audio\n" };
+        outcome.* = .{ .failed = "record: failed to save " ++ library.recording.format_name ++ " audio\n" };
         return false;
     };
     const stat = std.Io.Dir.cwd().statFile(io, path, .{}) catch {
-        outcome.* = .{ .failed = "record: failed to write M4A audio\n" };
+        outcome.* = .{ .failed = "record: failed to write " ++ library.recording.format_name ++ " audio\n" };
         return false;
     };
     outcome.* = .{ .saved = .{ .dur_csec = dur_csec, .bytes = stat.size } };
@@ -279,6 +263,9 @@ fn onSigint(sig: std.posix.SIG) callconv(.c) void {
 }
 
 fn installSigintHandler() void {
+    // Windows has no SIGINT for console apps; Ctrl-C arrives as the 0x03
+    // key byte (VT input) and the loop breaks on it like on ESC.
+    if (@import("builtin").os.tag == .windows) return;
     const act = std.posix.Sigaction{
         .handler = .{ .handler = onSigint },
         .mask = std.posix.sigemptyset(),
@@ -305,12 +292,24 @@ const Tm = extern struct {
 
 extern "c" fn time(now: ?*i64) i64;
 extern "c" fn localtime_r(now: *const i64, result: *Tm) ?*Tm;
+// Windows CRT: no _r functions — localtime fills a static buffer (fine;
+// the record loop is single-threaded around this call).
+extern "c" fn localtime(now: *const i64) ?*Tm;
+
+fn localTime(now: *const i64, out: *Tm) bool {
+    if (@import("builtin").os.tag == .windows) {
+        const t = localtime(now) orelse return false;
+        out.* = t.*;
+        return true;
+    }
+    return localtime_r(now, out) != null;
+}
 
 /// "YYYYMMDD-HHMMSS" (15 bytes) from the local wall clock.
 fn localTimestamp(out: *[15]u8) void {
     const now: i64 = time(null);
     var tm: Tm = undefined;
-    if (localtime_r(&now, &tm) == null) {
+    if (!localTime(&now, &tm)) {
         @memcpy(out, "19700101-000000");
         return;
     }

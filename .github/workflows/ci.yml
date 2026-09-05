@@ -6,12 +6,39 @@ on:
   pull_request:
 
 jobs:
-  build-and-test:
-    runs-on: macos-14
+  # Each native platform runs the unit tests on its own runner; the build
+  # matrix below cross-compiles every release target with the same zig.
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-14, ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: mlugg/setup-zig@v2
         with:
           version: "0.16.0"
-      - run: zig build
       - run: zig build test
+
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runs-on: macos-14, target: aarch64-macos, artifact: rec-macos-arm64 }
+          - { runs-on: macos-14, target: x86_64-macos, artifact: rec-macos-intel }
+          - { runs-on: ubuntu-latest, target: x86_64-linux, artifact: rec-linux-x64 }
+          - { runs-on: ubuntu-latest, target: aarch64-linux, artifact: rec-linux-arm64 }
+          - { runs-on: windows-latest, target: x86_64-windows, artifact: rec-windows-x64.exe }
+    runs-on: ${{ matrix.runs-on }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: "0.16.0"
+      - run: zig build -Dtarget=${{ matrix.target }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: zig-out/bin/

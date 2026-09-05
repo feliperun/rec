@@ -5,11 +5,11 @@
 [![Made with Zig](https://img.shields.io/badge/Zig-0.16-f7a41d?logo=zig&logoColor=white)](https://ziglang.org)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-**Record. Transcribe. Understand.** A meeting recorder for macOS that lives
-entirely in your terminal — capture microphone audio as M4A with one
-keypress, transcribe it to markdown through Deepgram, and let a local
-coding-agent LLM clean up the transcript or turn it into structured meeting
-notes. One small Zig binary, no Electron, no servers of its own.
+**Record. Transcribe. Understand.** A meeting recorder that lives entirely
+in your terminal — capture microphone audio with one keypress, transcribe it
+to markdown through Deepgram, and let a local coding-agent LLM clean up the
+transcript or turn it into structured meeting notes. One small Zig binary,
+no Electron, no servers of its own.
 
 <img src="docs/demo.gif" alt="rec recording with a live waveform, then playing back, cutting a region out with two anchors and a confirmed delete, and listing the library" width="100%">
 
@@ -32,8 +32,8 @@ Documento salvo em ~/recordings/20260826-093000.meeting.md
 ## Why you might like it
 
 - **Zero-friction capture** — `rec` opens the mic immediately; recordings
-  land in `~/recordings/` as real M4A files encoded by macOS's own
-  AudioToolbox codec (compact AAC, not gigantic WAVs).
+  land in `~/recordings/` as real M4A files on macOS (encoded by the OS's own
+  AudioToolbox codec) or WAV elsewhere ([ADR 0012](docs/adr/0012-recording-format-per-platform.md)).
 - **Honest transcripts** — Deepgram nova-3 diarization rendered as clean,
   plain-prose OKF markdown: YAML frontmatter for machines, readable
   paragraphs for humans.
@@ -56,12 +56,23 @@ Documento salvo em ~/recordings/20260826-093000.meeting.md
 
 ## Install
 
+macOS and Linux:
+
 ```sh
 curl -fsSL https://raw.githubusercontent.com/feliperun/rec/main/install.sh | sh
 ```
 
-Downloads the latest release and installs the `rec` binary to
-`/usr/local/bin`. Apple Silicon only; no dependencies beyond the OS.
+Windows (PowerShell):
+
+```powershell
+irm https://raw.githubusercontent.com/feliperun/rec/main/install.ps1 | iex
+```
+
+Each installer detects OS and architecture, downloads the matching release
+build, and installs it: `/usr/local/bin/rec` on macOS and Linux, and
+`%LOCALAPPDATA%\Programs\rec\rec.exe` (added to your PATH) on Windows.
+Pass `VERSION=<tag>` to pin a release instead of the latest.
+No dependencies beyond the OS.
 
 For transcript processing, install at least one supported coding agent and
 authenticate it the way you normally would, then run `rec setup`.
@@ -252,17 +263,21 @@ Piped output carries no ANSI codes, so scripts can keep grepping it; set
 
 Prerequisites:
 
-- macOS Apple Silicon with a working microphone
-- [Zig](https://ziglang.org) (stable toolchain via Homebrew): `brew install zig`
+- A supported platform with a working microphone (macOS Apple Silicon/Intel,
+  Linux x64/arm64, Windows x64)
+- [Zig](https://ziglang.org) 0.16: `brew install zig` or from ziglang.org
 
 ```sh
 zig build
 zig build test     # unit tests: encoder, parsers, prompts, arg parsing
 ```
 
-The binary lands at `zig-out/bin/rec`. Audio I/O (capture and playback) uses
-the vendored [miniaudio](https://miniaud.io) library; releases are built in
-`ReleaseFast` mode (see `.github/workflows/release.yml`).
+The binary lands at `zig-out/bin/rec`. Any host cross-compiles any target —
+`zig build -Dtarget=x86_64-windows` (or `-Dtarget=x86_64-macos`,
+`aarch64-linux`, …) builds it without a toolchain for that platform. Audio
+I/O (capture and playback) uses the vendored
+[miniaudio](https://miniaud.io) library; releases are built in `ReleaseFast`
+mode (see `.github/workflows/release.yml`).
 
 ## How it works
 
@@ -304,7 +319,9 @@ See [`docs/SPEC.md`](docs/SPEC.md) for the functional specification.
 - Transcription quality follows Deepgram; refinement quality follows
   whichever coding agent you point rec at. Both degrade independently and
   gracefully.
-- This project targets Apple Silicon macOS only.
+- Supported platforms: macOS Apple Silicon and Intel, Linux x64/arm64
+  (recording as WAV), and Windows x64 (WAV). M4A recording stays macOS-only —
+  it uses the OS's own AAC codec.
 
 ## License
 

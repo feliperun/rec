@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const prompts = @import("prompts.zig");
 
 // ---------------------------------------------------------------------------
@@ -142,14 +143,22 @@ extern "c" var environ: [*:null]?[*:0]u8;
 
 // libc write/fcntl on the raw pipe fds: std.posix has read() but no partial
 // write() in 0.16, and nonblocking feeding is what lets the poll loop drain
-// stdout while the child is still consuming stdin (macOS EAGAIN == 35).
-const einval_again = 35;
+// stdout while the child is still consuming stdin. EAGAIN surfaces through
+// the platform errno accessor (__error on macOS, __errno_location on Linux);
+// its value and O_NONBLOCK's differ between them.
+const einval_again: c_int = if (builtin.os.tag == .macos) 35 else 11;
 extern "c" fn write(fd: c_int, buf: [*]const u8, nbyte: usize) isize;
 extern "c" fn fcntl(fd: c_int, cmd: c_int, arg: c_int) c_int;
 extern "c" fn __error() *c_int;
+extern "c" fn __errno_location() *c_int;
+const errno_ptr = if (builtin.os.tag == .macos) __error else __errno_location;
 const f_getfl: c_int = 3;
 const f_setfl: c_int = 4;
-const o_nonblock: c_int = 0o4000;
+const o_nonblock: c_int = if (builtin.os.tag == .macos) 0o4 else 0o4000;
+// Windows process-bound plumbing for the file-redirected harness run
+// (analyzed only on Windows targets).
+extern "kernel32" fn TerminateProcess(handle: std.os.windows.HANDLE, exit_code: u32) i32;
+extern "kernel32" fn WaitForSingleObject(handle: std.os.windows.HANDLE, milliseconds: u32) u32;
 
 pub fn envValue(name: [*:0]const u8) ?[]const u8 {
     const v = getenv(name) orelse return null;
@@ -158,22 +167,41 @@ pub fn envValue(name: [*:0]const u8) ?[]const u8 {
     return s;
 }
 
+/// The directory for rec's scratch files (codex output; on Windows the whole
+/// harness stdio). TMPDIR on POSIX; TEMP/TMP with the system fallback there.
+fn tempDir() []const u8 {
+    if (envValue("TMPDIR")) |d| return d;
+    if (builtin.os.tag == .windows) {
+        if (envValue("TEMP")) |d| return d;
+        if (envValue("TMP")) |d| return d;
+        return "C:/Windows/Temp";
+    }
+    return "/tmp";
+}
+
 /// Absolute path of an executable `name` found on PATH (execute permission
 /// checked); null when absent everywhere. Caller owns the bytes. Reading PATH
 /// through libc mirrors main.zig's time()/localtime_r() idiom: libc is already
 /// linked and callers do not thread the raw environ down here.
 pub fn findBinary(io: std.Io, gpa: std.mem.Allocator, name: []const u8) ?[]u8 {
-    var it = std.mem.splitScalar(u8, envValue("PATH") orelse return null, ':');
+    const windows = builtin.os.tag == .windows;
+    const path_sep: u8 = if (windows) ';' else ':';
+    const dir_sep: u8 = if (windows) '\\' else '/';
+    // Windows: CreateProcess wants the .exe spelling when none is given.
+    const dot_exe: []const u8 = if (windows and std.mem.indexOfScalar(u8, name, '.') == null) ".exe" else "";
+
+    var it = std.mem.splitScalar(u8, envValue("PATH") orelse return null, path_sep);
     while (it.next()) |dir_raw| {
         // Empty components mean "current directory" in POSIX terms; never an
         // execution source we want.
-        const dir = std.mem.trimEnd(u8, dir_raw, "/");
+        const dir = std.mem.trimEnd(u8, dir_raw, "/\\");
         if (dir.len == 0) continue;
 
-        const candidate = gpa.alloc(u8, dir.len + 1 + name.len) catch return null;
+        const candidate = gpa.alloc(u8, dir.len + 1 + name.len + dot_exe.len) catch return null;
         @memcpy(candidate[0..dir.len], dir);
-        candidate[dir.len] = '/';
-        @memcpy(candidate[dir.len + 1 ..], name);
+        candidate[dir.len] = dir_sep;
+        @memcpy(candidate[dir.len + 1 ..][0..name.len], name);
+        @memcpy(candidate[dir.len + 1 + name.len ..], dot_exe);
 
         std.Io.Dir.accessAbsolute(io, candidate, .{ .execute = true }) catch {
             gpa.free(candidate);
@@ -613,11 +641,10 @@ pub fn run(
     var tmp_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     var tmp_out_path: ?[]const u8 = null;
     if (kind == .codex) {
-        const tmp_dir = envValue("TMPDIR") orelse "/tmp";
         tmp_out_path = std.fmt.bufPrint(
             &tmp_buf,
             "{s}/rec-codex-{d}.out",
-            .{ std.mem.trimEnd(u8, tmp_dir, "/"), nextTempId() },
+            .{ std.mem.trimEnd(u8, tempDir(), "/"), nextTempId() },
         ) catch return error.NameTooLong;
     }
 
@@ -634,102 +661,113 @@ pub fn run(
     defer if (provider_env_applied) environ_map.deinit();
     if (provider != .anthropic and kind == .claude) {
         const api_key = envValue(provider.keyEnvName().?) orelse return error.MissingKey;
+        // POSIX reads the libc environ global; Windows reads the PEB block
+        // (createMap ignores the passed slice there).
         environ_map = std.process.Environ.createMap(
-            .{ .block = .{ .slice = std.mem.sliceTo(environ, null) } },
+            if (builtin.os.tag == .windows)
+                .{ .block = .global }
+            else
+                .{ .block = .{ .slice = std.mem.sliceTo(environ, null) } },
             gpa,
         ) catch return error.OutOfMemory;
         applyProviderEnv(&environ_map, provider, model, api_key) catch return error.OutOfMemory;
         provider_env_applied = true;
     }
 
-    var child = std.process.spawn(io, .{
-        .argv = argv,
-        .stdin = .pipe,
-        .stdout = .pipe,
-        .stderr = .pipe,
-        .environ_map = if (provider_env_applied) &environ_map else null,
-    }) catch |err| switch (err) {
-        error.FileNotFound => return error.BinaryMissing,
-        error.OutOfMemory => return error.OutOfMemory,
-        else => return error.SpawnFailed,
-    };
-    // kill() reaps when id is still live, so early returns above never leak
-    // children; after wait() below it is a no-op.
-    defer child.kill(io);
-    if (child.stdin) |f| setNonblocking(f.handle);
-
-    // All three pipe ends start open on our side; each closes once fully
-    // consumed or once the far end hangs up. When none remain the loop ends.
     var out_bytes: std.ArrayList(u8) = .empty;
     var err_bytes: std.ArrayList(u8) = .empty;
-    var written: usize = 0;
-    var stdin_open = true;
-    var stdout_open = true;
-    var stderr_open = true;
-
     const started = std.Io.Timestamp.now(io, .awake);
     const deadline = started.addDuration(.{ .nanoseconds = timeout_ns });
 
-    while (stdin_open or stdout_open or stderr_open) {
-        if (std.Io.Timestamp.now(io, .awake).nanoseconds >= deadline.nanoseconds) {
-            return error.TimedOut;
-        }
+    if (builtin.os.tag == .windows) {
+        // Windows pipe handles cannot poll(); the child runs with its stdio
+        // redirected through temp files instead.
+        try runChildViaFiles(io, arena, argv, if (provider_env_applied) &environ_map else null, prompt, deadline, &out_bytes, &err_bytes);
+    } else {
+        var child = std.process.spawn(io, .{
+            .argv = argv,
+            .stdin = .pipe,
+            .stdout = .pipe,
+            .stderr = .pipe,
+            .environ_map = if (provider_env_applied) &environ_map else null,
+        }) catch |err| switch (err) {
+            error.FileNotFound => return error.BinaryMissing,
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return error.SpawnFailed,
+        };
+        // kill() reaps when id is still live, so early returns above never
+        // leak children; after wait() below it is a no-op.
+        defer child.kill(io);
+        if (child.stdin) |f| setNonblocking(f.handle);
 
-        var pfds: [3]std.posix.pollfd = undefined;
-        var n_slots: usize = 0;
-        var w_slot: ?usize = null;
-        var o_slot: ?usize = null;
-        var e_slot: ?usize = null;
-        if (stdin_open) {
-            w_slot = n_slots;
-            pfds[n_slots] = .{ .fd = child.stdin.?.handle, .events = std.posix.POLL.OUT, .revents = 0 };
-            n_slots += 1;
-        }
-        if (stdout_open) {
-            o_slot = n_slots;
-            pfds[n_slots] = .{ .fd = child.stdout.?.handle, .events = std.posix.POLL.IN, .revents = 0 };
-            n_slots += 1;
-        }
-        if (stderr_open) {
-            e_slot = n_slots;
-            pfds[n_slots] = .{ .fd = child.stderr.?.handle, .events = std.posix.POLL.IN, .revents = 0 };
-            n_slots += 1;
-        }
+        // All three pipe ends start open on our side; each closes once fully
+        // consumed or once the far end hangs up. When none remain the loop ends.
+        var written: usize = 0;
+        var stdin_open = true;
+        var stdout_open = true;
+        var stderr_open = true;
 
-        const ready = std.posix.poll(pfds[0..n_slots], 200) catch return error.SpawnFailed;
-        if (ready == 0) continue;
+        while (stdin_open or stdout_open or stderr_open) {
+            if (std.Io.Timestamp.now(io, .awake).nanoseconds >= deadline.nanoseconds) {
+                return error.TimedOut;
+            }
 
-        // Feed stdin in bounded chunks; partial writes are expected and fine.
-        if (w_slot) |s| {
-            if (pfds[s].revents != 0) feedStdin(io, &child, prompt, &written, &stdin_open);
-        }
-        if (o_slot) |s| {
-            if (pfds[s].revents != 0) {
-                drainPipe(io, &child.stdout, &out_bytes, arena, max_output_bytes, &stdout_open) catch |err| switch (err) {
-                    error.OutputTooLarge => return error.OutputTooLarge,
-                    error.OutOfMemory => return error.OutOfMemory,
-                };
+            var pfds: [3]std.posix.pollfd = undefined;
+            var n_slots: usize = 0;
+            var w_slot: ?usize = null;
+            var o_slot: ?usize = null;
+            var e_slot: ?usize = null;
+            if (stdin_open) {
+                w_slot = n_slots;
+                pfds[n_slots] = .{ .fd = child.stdin.?.handle, .events = std.posix.POLL.OUT, .revents = 0 };
+                n_slots += 1;
+            }
+            if (stdout_open) {
+                o_slot = n_slots;
+                pfds[n_slots] = .{ .fd = child.stdout.?.handle, .events = std.posix.POLL.IN, .revents = 0 };
+                n_slots += 1;
+            }
+            if (stderr_open) {
+                e_slot = n_slots;
+                pfds[n_slots] = .{ .fd = child.stderr.?.handle, .events = std.posix.POLL.IN, .revents = 0 };
+                n_slots += 1;
+            }
+
+            const ready = std.posix.poll(pfds[0..n_slots], 200) catch return error.SpawnFailed;
+            if (ready == 0) continue;
+
+            // Feed stdin in bounded chunks; partial writes are expected and fine.
+            if (w_slot) |s| {
+                if (pfds[s].revents != 0) feedStdin(io, &child, prompt, &written, &stdin_open);
+            }
+            if (o_slot) |s| {
+                if (pfds[s].revents != 0) {
+                    drainPipe(io, &child.stdout, &out_bytes, arena, max_output_bytes, &stdout_open) catch |err| switch (err) {
+                        error.OutputTooLarge => return error.OutputTooLarge,
+                        error.OutOfMemory => return error.OutOfMemory,
+                    };
+                }
+            }
+            if (e_slot) |s| {
+                if (pfds[s].revents != 0) {
+                    drainPipe(io, &child.stderr, &err_bytes, arena, max_output_bytes, &stderr_open) catch |err| switch (err) {
+                        error.OutputTooLarge => {}, // diagnostics: keep whatever arrived first
+                        error.OutOfMemory => return error.OutOfMemory,
+                    };
+                }
             }
         }
-        if (e_slot) |s| {
-            if (pfds[s].revents != 0) {
-                drainPipe(io, &child.stderr, &err_bytes, arena, max_output_bytes, &stderr_open) catch |err| switch (err) {
-                    error.OutputTooLarge => {}, // diagnostics: keep whatever arrived first
-                    error.OutOfMemory => return error.OutOfMemory,
-                };
-            }
+
+        const posix_term = child.wait(io) catch return error.SpawnFailed;
+        switch (posix_term) {
+            .exited => |code| {
+                if (code != 0) return error.ChildFailed;
+            },
+            else => return error.ChildFailed,
         }
     }
 
     flattenTail(note_buf, note_len, keepTail(err_bytes.items, max_note_bytes));
-
-    const term = child.wait(io) catch return error.SpawnFailed;
-    switch (term) {
-        .exited => |code| {
-            if (code != 0) return error.ChildFailed;
-        },
-        else => return error.ChildFailed,
-    }
 
     const extracted_raw = extractAnswer(io, arena, kind, tmp_out_path, out_bytes.items) catch |err| switch (err) {
         error.EmptyOutput => return error.EmptyOutput,
@@ -742,6 +780,102 @@ pub fn run(
     return .{ .arena_state = arena_state, ._text = text_final };
 }
 
+/// Windows: pipe handles cannot poll(), so the harness runs with its stdio
+/// redirected through temp files — `prompt` as the child's stdin,
+/// stdout/stderr captured and handed back to the caller. `child.id` on
+/// Windows is the process handle, which WaitForSingleObject bounds by the
+/// same wall-clock deadline as the POSIX poll loop.
+fn runChildViaFiles(
+    io: std.Io,
+    arena: std.mem.Allocator,
+    argv: []const []const u8,
+    environ_map: ?*std.process.Environ.Map,
+    prompt: []const u8,
+    deadline: std.Io.Timestamp,
+    out_bytes: *std.ArrayList(u8),
+    err_bytes: *std.ArrayList(u8),
+) InvokeError!void {
+    const wait_object_0: u32 = 0;
+
+    const id = nextTempId();
+    var in_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    var out_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    var err_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const base = std.mem.trimEnd(u8, tempDir(), "/");
+    const in_path = std.fmt.bufPrint(&in_buf, "{s}/rec-run-{d}-in.txt", .{ base, id }) catch return error.NameTooLong;
+    const out_path = std.fmt.bufPrint(&out_buf, "{s}/rec-run-{d}-out.txt", .{ base, id }) catch return error.NameTooLong;
+    const err_path = std.fmt.bufPrint(&err_buf, "{s}/rec-run-{d}-err.txt", .{ base, id }) catch return error.NameTooLong;
+    defer {
+        std.Io.Dir.deleteFileAbsolute(io, in_path) catch {};
+        std.Io.Dir.deleteFileAbsolute(io, out_path) catch {};
+        std.Io.Dir.deleteFileAbsolute(io, err_path) catch {};
+    }
+
+    // The prompt becomes the child's stdin file: written up front, so the
+    // nonblocking feeding loop disappears entirely.
+    {
+        var f = std.Io.Dir.createFileAbsolute(io, in_path, .{}) catch return error.SpawnFailed;
+        f.writeStreamingAll(io, prompt) catch {
+            f.close(io);
+            return error.SpawnFailed;
+        };
+        f.close(io);
+    }
+
+    const in_file = std.Io.Dir.openFileAbsolute(io, in_path, .{}) catch return error.SpawnFailed;
+    const out_file = std.Io.Dir.createFileAbsolute(io, out_path, .{}) catch {
+        in_file.close(io);
+        return error.SpawnFailed;
+    };
+    const err_file = std.Io.Dir.createFileAbsolute(io, err_path, .{}) catch {
+        out_file.close(io);
+        in_file.close(io);
+        return error.SpawnFailed;
+    };
+
+    var child = std.process.spawn(io, .{
+        .argv = argv,
+        .stdin = .{ .file = in_file },
+        .stdout = .{ .file = out_file },
+        .stderr = .{ .file = err_file },
+        .environ_map = environ_map,
+    }) catch |err| {
+        in_file.close(io);
+        out_file.close(io);
+        err_file.close(io);
+        return switch (err) {
+            error.FileNotFound => error.BinaryMissing,
+            error.OutOfMemory => error.OutOfMemory,
+            else => error.SpawnFailed,
+        };
+    };
+    // The child holds its own inherited handles now.
+    in_file.close(io);
+    out_file.close(io);
+    err_file.close(io);
+
+    while (true) {
+        const now = std.Io.Timestamp.now(io, .awake);
+        if (now.nanoseconds >= deadline.nanoseconds) {
+            _ = TerminateProcess(child.id.?, 1);
+            _ = child.wait(io) catch {};
+            return error.TimedOut;
+        }
+        const remaining_ns: u64 = @intCast(deadline.nanoseconds - now.nanoseconds);
+        const ms: u32 = @intCast(@min(remaining_ns / 1_000_000, std.math.maxInt(u32)));
+        if (WaitForSingleObject(child.id.?, ms) == wait_object_0) break;
+    }
+    switch (child.wait(io) catch return error.SpawnFailed) {
+        .exited => |code| if (code != 0) return error.ChildFailed,
+        else => return error.ChildFailed,
+    }
+
+    const out_data = std.Io.Dir.cwd().readFileAlloc(io, out_path, arena, .limited(max_output_bytes)) catch "";
+    out_bytes.appendSlice(arena, out_data) catch return error.OutOfMemory;
+    const err_data = std.Io.Dir.cwd().readFileAlloc(io, err_path, arena, .limited(max_note_bytes)) catch "";
+    err_bytes.appendSlice(arena, err_data) catch return error.OutOfMemory;
+}
+
 /// Writes as much of `prompt` as the nonblocking pipe accepts per call;
 /// closes the end when done or when the child went away before reading it
 /// all. EAGAIN is not an error — the poll loop retries next tick.
@@ -751,7 +885,7 @@ fn feedStdin(io: std.Io, child: *std.process.Child, prompt: []const u8, written:
         const end = @min(written.* + 64 * 1024, prompt.len);
         const rc = write(fd, prompt[written.*..end].ptr, end - written.*);
         if (rc < 0) {
-            if (__error().* == einval_again) return;
+            if (errno_ptr().* == einval_again) return;
             // Anything else (BrokenPipe etc.): the child died before
             // consuming input; stop feeding and let the drains surface it.
             break;

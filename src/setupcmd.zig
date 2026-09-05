@@ -1,4 +1,5 @@
 const std = @import("std");
+const keys = @import("keys.zig");
 const llm = @import("llm.zig");
 
 const probe_prompt = "Responda exatamente: OK";
@@ -309,8 +310,7 @@ pub fn readLine(buf: []u8) ?[]const u8 {
     var n: usize = 0;
     while (n < buf.len) {
         var byte: [1]u8 = undefined;
-        const got = std.posix.read(0, &byte) catch return null;
-        if (got == 0) {
+        if (!keys.readByte(&byte[0])) {
             if (n == 0) return null;
             break;
         }

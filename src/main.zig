@@ -31,7 +31,10 @@ pub fn main(init: std.process.Init) u8 {
 
     var args: std.ArrayList([:0]const u8) = .empty;
     defer args.deinit(init.gpa);
-    var args_it = std.process.Args.Iterator.init(init.minimal.args);
+    var args_it = std.process.Args.Iterator.initAllocator(init.minimal.args, init.gpa) catch {
+        printStderr(io, "out of memory\n");
+        return 1;
+    };
     defer args_it.deinit();
     while (args_it.next()) |arg| {
         args.append(init.gpa, arg) catch {
@@ -40,7 +43,14 @@ pub fn main(init: std.process.Init) u8 {
         };
     }
 
-    const home_dir: []const u8 = init.minimal.environ.getPosix("HOME") orelse "";
+    // getAlloc works on every platform (USERPROFILE on Windows); a missing
+    // or unreadable variable degrades to "" and the library path fails with
+    // its own message. The value lives for the whole run and is released
+    // when main returns — the debug allocator counts anything less.
+    const home_var: []const u8 = if (@import("builtin").os.tag == .windows) "USERPROFILE" else "HOME";
+    const home_alloc: ?[]u8 = init.minimal.environ.getAlloc(init.gpa, home_var) catch null;
+    defer if (home_alloc) |h| init.gpa.free(h);
+    const home_dir: []const u8 = home_alloc orelse "";
 
     var recordings_path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const recordings_path = library.homeRecordingsPath(home_dir, &recordings_path_buf) orelse {
@@ -86,12 +96,14 @@ pub fn main(init: std.process.Init) u8 {
     if (std.mem.eql(u8, cmd, "transcribe")) {
         // One environment lookup here (the only place the raw environ is in
         // scope); transcribecmd still orders its errors so a bad selection
-        // is reported before a missing key.
+        // is reported before a missing key. main owns the key's memory.
+        const api_key: ?[]u8 = init.minimal.environ.getAlloc(init.gpa, "DEEPGRAM_API_KEY") catch null;
+        defer if (api_key) |k| init.gpa.free(k);
         return transcribecmd.run(
             io,
             init.gpa,
             rest,
-            init.minimal.environ.getPosix("DEEPGRAM_API_KEY"),
+            api_key,
             home_dir,
             recordings_path,
         );
@@ -136,7 +148,7 @@ fn printStderr(io: std.Io, msg: []const u8) void {
 }
 
 test {
-    _ = @import("m4a.zig");
+    if (@import("builtin").os.tag == .macos) _ = @import("m4a.zig");
     _ = @import("capture.zig");
     _ = @import("record.zig");
     _ = @import("formatcmd.zig");
@@ -154,4 +166,5 @@ test {
     _ = @import("waveform.zig");
     _ = @import("cut.zig");
     _ = @import("keys.zig");
+    _ = @import("wav.zig");
 }

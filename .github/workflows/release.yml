@@ -23,9 +23,16 @@ jobs:
   build:
     needs: release-please
     if: ${{ needs.release-please.outputs.release_created == 'true' }}
-    # Apple Silicon only: GitHub's Intel macOS runners (macos-13) are being
-    # retired and no longer schedule reliably.
-    runs-on: macos-14
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runs-on: macos-14, target: aarch64-macos, artifact: rec-macos-arm64 }
+          - { runs-on: macos-14, target: x86_64-macos, artifact: rec-macos-intel }
+          - { runs-on: ubuntu-latest, target: x86_64-linux, artifact: rec-linux-x64 }
+          - { runs-on: ubuntu-latest, target: aarch64-linux, artifact: rec-linux-arm64 }
+          - { runs-on: windows-latest, target: x86_64-windows, artifact: rec-windows-x64.exe }
+    runs-on: ${{ matrix.runs-on }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -35,10 +42,11 @@ jobs:
           version: "0.16.0"
       # Releases are always built ReleaseFast: optimized and stripped of
       # safety checks, so the distributed binary stays small.
-      - run: zig build -Doptimize=ReleaseFast
-      - run: |
-          mkdir -p dist
-          cp zig-out/bin/rec dist/rec-macos-arm64
-      - run: gh release upload "${{ needs.release-please.outputs.tag_name }}" dist/rec-macos-arm64 --clobber
+      - run: zig build -Doptimize=ReleaseFast -Dtarget=${{ matrix.target }}
+      # `cp` and `mkdir` (no -p) spell the same in bash and pwsh, and dist is
+      # always fresh on a release runner.
+      - run: mkdir dist
+      - run: cp zig-out/bin/rec* dist/${{ matrix.artifact }}
+      - run: gh release upload "${{ needs.release-please.outputs.tag_name }}" "dist/${{ matrix.artifact }}" --clobber
         env:
           GH_TOKEN: ${{ github.token }}
