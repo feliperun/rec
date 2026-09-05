@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.8.2](https://github.com/feliperun/rec/compare/v1.8.1...v1.8.2) (2026-09-05)
+
+
+### Bug Fixes
+
+* run the release sanity step only where the runner can execute the target ([9fc23dc](https://github.com/feliperun/rec/commit/9fc23dc9a8240fbcd71c23113687b1ed1b5adfc8))
+
 ## [1.8.1](https://github.com/feliperun/rec/compare/v1.8.0...v1.8.1) (2026-09-05)
 
 
