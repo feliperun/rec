@@ -136,7 +136,7 @@ fn printStderr(io: std.Io, msg: []const u8) void {
 }
 
 test {
-    _ = @import("m4a.zig");
+    if (@import("builtin").os.tag == .macos) _ = @import("m4a.zig");
     _ = @import("capture.zig");
     _ = @import("record.zig");
     _ = @import("formatcmd.zig");
@@ -154,4 +154,5 @@ test {
     _ = @import("waveform.zig");
     _ = @import("cut.zig");
     _ = @import("keys.zig");
+    _ = @import("wav.zig");
 }

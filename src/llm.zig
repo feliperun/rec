@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const prompts = @import("prompts.zig");
 
 // ---------------------------------------------------------------------------
@@ -142,14 +143,18 @@ extern "c" var environ: [*:null]?[*:0]u8;
 
 // libc write/fcntl on the raw pipe fds: std.posix has read() but no partial
 // write() in 0.16, and nonblocking feeding is what lets the poll loop drain
-// stdout while the child is still consuming stdin (macOS EAGAIN == 35).
-const einval_again = 35;
+// stdout while the child is still consuming stdin. EAGAIN surfaces through
+// the platform errno accessor (__error on macOS, __errno_location on Linux);
+// its value and O_NONBLOCK's differ between them.
+const einval_again: c_int = if (builtin.os.tag == .macos) 35 else 11;
 extern "c" fn write(fd: c_int, buf: [*]const u8, nbyte: usize) isize;
 extern "c" fn fcntl(fd: c_int, cmd: c_int, arg: c_int) c_int;
 extern "c" fn __error() *c_int;
+extern "c" fn __errno_location() *c_int;
+const errno_ptr = if (builtin.os.tag == .macos) __error else __errno_location;
 const f_getfl: c_int = 3;
 const f_setfl: c_int = 4;
-const o_nonblock: c_int = 0o4000;
+const o_nonblock: c_int = if (builtin.os.tag == .macos) 0o4 else 0o4000;
 
 pub fn envValue(name: [*:0]const u8) ?[]const u8 {
     const v = getenv(name) orelse return null;
@@ -751,7 +756,7 @@ fn feedStdin(io: std.Io, child: *std.process.Child, prompt: []const u8, written:
         const end = @min(written.* + 64 * 1024, prompt.len);
         const rc = write(fd, prompt[written.*..end].ptr, end - written.*);
         if (rc < 0) {
-            if (__error().* == einval_again) return;
+            if (errno_ptr().* == einval_again) return;
             // Anything else (BrokenPipe etc.): the child died before
             // consuming input; stop feeding and let the drains surface it.
             break;

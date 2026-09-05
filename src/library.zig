@@ -1,8 +1,61 @@
 const std = @import("std");
 const m4a = @import("m4a.zig");
 const style = @import("style.zig");
+const wav = @import("wav.zig");
 
 pub const recordings_dir = "recordings";
+
+/// The recording format of the platform, behind one facade so no caller
+/// branches on the OS (see docs/adr/0012): M4A/AAC through the system
+/// encoder on macOS — where it ships — plain 16-bit WAV everywhere else,
+/// which miniaudio plays and parses natively. Lives on the library module
+/// because every format-aware caller already depends on it.
+pub const recording = struct {
+    /// True on macOS, where M4A files are recorded, scanned, played, and cut.
+    pub const m4a_supported = @import("builtin").os.tag == .macos;
+
+    /// The extension (with dot, always 4 bytes) recordings are published under.
+    pub const ext = if (m4a_supported) ".m4a" else ".wav";
+
+    /// The format name as user-facing copy spells it.
+    pub const format_name = if (m4a_supported) "M4A" else "WAV";
+
+    pub const Error = if (m4a_supported) m4a.M4aError else wav.Error;
+    pub const Encoder = if (m4a_supported) m4a.Encoder else wav.Encoder;
+
+    /// Decoded audio in the project's canonical PCM format: interleaved
+    /// s16le at 48 kHz stereo, whatever the file's own encoding. `pcm` is
+    /// owned by the caller. Only meaningful for M4A (the platform's encoded
+    /// format); WAV payloads are parsed in place by cut.zig.
+    pub const Decoded = struct {
+        pcm: []u8,
+        sample_rate: u32,
+        channels: u32,
+    };
+
+    pub fn decode(gpa: std.mem.Allocator, path: []const u8) (Error || std.mem.Allocator.Error)!Decoded {
+        if (m4a_supported) {
+            const d = try m4a.decode(gpa, path);
+            return .{ .pcm = d.pcm, .sample_rate = d.sample_rate, .channels = d.channels };
+        }
+        return error.CreateFailed; // no M4A exists to decode elsewhere
+    }
+
+    /// Encodes interleaved s16le PCM (the capture format) into a recording
+    /// at `path`, overwriting any file already there.
+    pub fn encode(path: []const u8, pcm: []const u8, sample_rate: u32, channels: u32) Error!void {
+        if (m4a_supported) return m4a.encode(path, pcm, sample_rate, channels);
+        return wav.encode(path, pcm, sample_rate, channels);
+    }
+
+    /// Duration of a recording at `path` in seconds via the platform's
+    /// parser; null when it cannot be probed. WAV durations come from the
+    /// header prefix scan below instead, so this only answers for M4A.
+    pub fn durationSec(path: []const u8) ?f64 {
+        if (m4a_supported) return m4a.durationSec(path);
+        return null;
+    }
+};
 
 /// Builds the persistent recordings directory ($HOME/recordings).
 /// The returned slice points into buf; no allocation is performed.
@@ -28,9 +81,10 @@ pub fn recordingPath(dir_path: []const u8, name: []const u8, buf: []u8) ?[]const
     return buf[0 .. len + name.len];
 }
 
-/// One row of the library: a recording (.m4a, or a legacy .wav) under
-/// $HOME/recordings/ with its stats and the duration parsed from its
-/// container (null when the container is unreadable).
+/// One row of the library: a recording under $HOME/recordings/ (the
+/// platform's recording format, plus legacy files from before a format
+/// switch) with its stats and the duration parsed from its container (null
+/// when the container is unreadable).
 pub const Entry = struct {
     name: []u8,
     mtime: std.Io.Timestamp,
@@ -44,9 +98,10 @@ pub fn freeEntries(gpa: std.mem.Allocator, entries: *std.ArrayList(Entry)) void 
 }
 
 /// Appends every recording under recordings_path to entries (names owned by
-/// gpa): `.m4a` (what record writes now) and `.wav` (files already on disk
-/// from before the format switch — still playable and transcribable). A
-/// missing directory is the empty library, not an error.
+/// gpa): the platform's recording format (`recording.ext`) and `.wav` files
+/// already on disk from before the macOS format switch — still playable and
+/// transcribable there. A missing directory is the empty library, not an
+/// error.
 pub fn scan(io: std.Io, gpa: std.mem.Allocator, entries: *std.ArrayList(Entry), recordings_path: []const u8) !void {
     var dir = std.Io.Dir.cwd().openDir(io, recordings_path, .{ .iterate = true }) catch return;
     defer dir.close(io);
@@ -57,6 +112,9 @@ pub fn scan(io: std.Io, gpa: std.mem.Allocator, entries: *std.ArrayList(Entry), 
         const is_m4a = std.mem.endsWith(u8, entry.name, ".m4a");
         const is_wav = std.mem.endsWith(u8, entry.name, ".wav");
         if (!is_m4a and !is_wav) continue;
+        // M4A only where the system can decode it; elsewhere the recordings
+        // are WAV and an M4A would be an unusable stray.
+        if (is_m4a and !recording.m4a_supported) continue;
 
         const stat = dir.statFile(io, entry.name, .{}) catch continue;
 
@@ -65,7 +123,7 @@ pub fn scan(io: std.Io, gpa: std.mem.Allocator, entries: *std.ArrayList(Entry), 
             // Duration comes from the system's MP4 parser.
             var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
             if (recordingPath(recordings_path, entry.name, &path_buf)) |path| {
-                duration_sec = m4a.durationSec(path);
+                duration_sec = recording.durationSec(path);
             }
         } else {
             // Header prefix only: durations come from the chunk headers, so
