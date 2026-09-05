@@ -1,5 +1,21 @@
 # Changelog
 
+## [1.8.0](https://github.com/feliperun/rec/compare/v1.7.0...v1.8.0) (2026-09-05)
+
+
+### Features
+
+* embed the zon version and add rec about ([5512c52](https://github.com/feliperun/rec/commit/5512c5210bfc40d6cbb6a7e6b31b41a5fd5c2562))
+* rec setup stores the Deepgram key ([8ce91ed](https://github.com/feliperun/rec/commit/8ce91ed4a49e461cee7ac96df49e13954f5642af))
+* self-update from github releases ([80fc16d](https://github.com/feliperun/rec/commit/80fc16d0277f6857eaa035aa43fabef5db848c2c))
+* self-update, rec about, and Deepgram key in setup ([70b3099](https://github.com/feliperun/rec/commit/70b30992928951ab83122efc3cc69dc394cc0e82))
+
+
+### Bug Fixes
+
+* release-please bumps build.zig.zon via manifest config ([ef00c2f](https://github.com/feliperun/rec/commit/ef00c2f7cdd47aa12669e5258e9f70030f6ba21f))
+* release-please bumps build.zig.zon via manifest config ([57fa674](https://github.com/feliperun/rec/commit/57fa674620ab2e36a2c6ec8bd1e3cc9d2179c553))
+
 ## [1.7.0](https://github.com/feliperun/rec/compare/v1.6.0...v1.7.0) (2026-09-05)
 
 
