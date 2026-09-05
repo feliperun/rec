@@ -59,7 +59,9 @@ ReleaseFast in CI); each native platform runs `zig build test` on its own CI
 runner, the other targets cross-compile ([ADR 0013](adr/0013-cross-platform-builds.md)).
 Releases ship `rec-<os>-<arch>` binaries, installed via `install.sh` (macOS,
 Linux) or `install.ps1` (Windows). Released with release-please
-(Conventional Commits).
+(Conventional Commits). Installed binaries update themselves from the
+latest release — an explicit `rec update`, plus a silent once-a-day check
+before other commands ([ADR 0014](adr/0014-self-update-from-github-releases.md)).
 
 ## Observability & quality
 

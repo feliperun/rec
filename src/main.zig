@@ -1,11 +1,13 @@
 const std = @import("std");
 const formatcmd = @import("formatcmd.zig");
 const library = @import("library.zig");
+const llm = @import("llm.zig");
 const playback = @import("playback.zig");
 const record = @import("record.zig");
 const setupcmd = @import("setupcmd.zig");
 const transcribecmd = @import("transcribecmd.zig");
 const tui = @import("tui.zig");
+const updater = @import("update.zig");
 
 const usage =
     \\Usage: rec [command]
@@ -22,6 +24,7 @@ const usage =
     \\  setup                      Choose which coding-agent LLM processes transcripts
     \\                             (alias: configure-llm)
     \\  about                      Show the project page and how to contribute
+    \\  update                     Update rec from GitHub Releases (auto-checked daily)
     \\
     \\With no command, enters interactive mode.
     \\
@@ -79,6 +82,15 @@ pub fn main(init: std.process.Init) u8 {
 
     const cmd = args.items[1];
     const rest = args.items[2..];
+
+    // Silent self-update check: once a day, never during a recording or when
+    // `update` itself is running, and mute on every failure path.
+    if (!std.mem.eql(u8, cmd, "record") and !std.mem.eql(u8, cmd, "update")) {
+        var cfg_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        if (llm.configDirPath(home_dir, llm.envValue("XDG_CONFIG_HOME"), &cfg_buf)) |config_dir| {
+            updater.autoCheck(io, init.gpa, config_dir);
+        }
+    }
 
     if (std.mem.eql(u8, cmd, "record")) {
         const ra = parseRecordArgs(rest);
@@ -143,6 +155,14 @@ pub fn main(init: std.process.Init) u8 {
         return 0;
     }
 
+    if (std.mem.eql(u8, cmd, "update")) {
+        if (rest.len != 0) {
+            printStderr(io, usage);
+            return 1;
+        }
+        return updater.run(io, init.gpa);
+    }
+
     printStderr(io, usage);
     return 1;
 }
@@ -190,6 +210,7 @@ test {
     _ = @import("style.zig");
     _ = @import("tui.zig");
     _ = @import("transcribecmd.zig");
+    _ = @import("update.zig");
     _ = @import("okf.zig");
     _ = @import("waveform.zig");
     _ = @import("cut.zig");
