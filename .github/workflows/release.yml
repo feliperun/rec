@@ -17,10 +17,12 @@ jobs:
     steps:
       - uses: googleapis/release-please-action@v5
         id: release
+        # Manifest mode: release-please-config.json declares the `simple`
+        # type (there is no `zig` type) plus a generic extra-file that bumps
+        # `version` in build.zig.zon — the single version source the binary
+        # embeds and auto-update compares.
         with:
-          # The zig type bumps `version` in build.zig.zon — the single
-          # version source the binary embeds and auto-update compares.
-          release-type: zig
+          token: ${{ secrets.GITHUB_TOKEN }}
 
   build:
     needs: release-please
