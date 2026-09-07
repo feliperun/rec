@@ -93,6 +93,23 @@ Record every failure that cost real debugging time, with the invariant that prev
 it and a link to the ADR or code that must not be undone. Highest-value part of this
 file — keep appending.
 
+- **`rec` can publish a genuinely silent M4A and print "Saved"** — the macOS input
+  chain (speaker playback bleeding into the capture device, echo cancellation and
+  ducking, Continuity input routing) can wash the signal down to −43..−55 dBFS RMS
+  while the file still plays fine; Deepgram then answers HTTP 200 with zero
+  utterances (`transcribe: no speech found`), which is **not** a transcribe or
+  writer regression. The recorder warns at publish time when every recorded second
+  stayed under the −40 dBFS RMS floor (`audibility_floor` and `LevelTracker` in
+  `src/record.zig`) — never drop that warning or tune the floor without re-measuring
+  real washes and real speech, and never treat a washed file as proof the pipeline
+  broke.
+- **A closed stdin makes `poll` report readable forever** — `keys.readKey` answered
+  `.eof` instantly, so every key loop paced on the poll window (record's tick loop)
+  spun at full speed with no pacing: 2.3 GB of stderr in 200 s. readKey burns the
+  pacing window out on EOF and broken-handle outcomes (`burnWindow` in
+  `src/keys.zig`); the "readKey's poll window is the tick pacing" invariant in
+  `src/record.zig` depends on that — `rec record < /dev/null` must stay bounded.
+
 - CoreFoundation's `Boolean` is `UInt8`, **not** C `bool` — declare externs like
   `CFURLCreateFromFileSystemRepresentation` with a `u8` parameter or the varargs
   ABI corrupts the call. See `src/m4a.zig` and [ADR 0004](docs/adr/0004-record-natively-in-m4a-aac.md).
