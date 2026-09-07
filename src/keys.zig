@@ -31,6 +31,7 @@ pub const Cooked = if (builtin.os.tag == .windows) u32 else std.posix.termios;
 const std_input_handle: i32 = -10;
 const enable_virtual_terminal_input: u32 = 0x0200;
 const wait_object_0: u32 = 0;
+const wait_timeout: u32 = 0x102;
 extern "kernel32" fn GetStdHandle(nStdHandle: i32) ?std.os.windows.HANDLE;
 extern "kernel32" fn GetConsoleMode(hConsoleHandle: std.os.windows.HANDLE, lpMode: *u32) i32;
 extern "kernel32" fn SetConsoleMode(hConsoleHandle: std.os.windows.HANDLE, dwMode: u32) i32;
@@ -81,15 +82,26 @@ pub fn restoreRaw(cooked: Cooked) void {
 // --- raw keystrokes ---------------------------------------------------------
 
 /// Waits up to `ms` for a keystroke and parses it. The poll window is what
-/// paces the UI loops.
-pub fn readKey(ms: i32) Key {
+/// paces the UI loops, so every outcome that surfaces without a key still
+/// spends it: a closed stdin reports readable forever and would otherwise
+/// answer .eof instantly, spinning the caller's tick loop at full speed.
+pub fn readKey(io: std.Io, ms: i32) Key {
     if (builtin.os.tag == .windows) {
         const win = stdInput() orelse return .none;
-        if (WaitForSingleObject(win, @intCast(@max(ms, 0))) != wait_object_0) return .none;
+        const wait = WaitForSingleObject(win, @intCast(@max(ms, 0)));
+        // WAIT_TIMEOUT already spent the whole pacing window; a failed wait
+        // returned at once and must burn it like the read failures below.
+        if (wait != wait_object_0) {
+            if (wait != wait_timeout) burnWindow(io, ms);
+            return .none;
+        }
         var buf: [32]u8 = undefined;
         var got: u32 = 0;
-        if (ReadFile(win, &buf, buf.len, &got, null) == 0) return .none;
-        if (got == 0) return .eof;
+        const read_ok = ReadFile(win, &buf, buf.len, &got, null) != 0;
+        if (!read_ok or got == 0) {
+            burnWindow(io, ms);
+            return if (read_ok) .eof else .none;
+        }
         var len: usize = got;
 
         // An escape sequence may arrive split across reads; collect the rest.
@@ -108,12 +120,24 @@ pub fn readKey(ms: i32) Key {
         .events = std.posix.POLL.IN,
         .revents = undefined,
     }};
-    const ready = std.posix.poll(&fds, ms) catch return .none;
+    const ready = std.posix.poll(&fds, ms) catch {
+        burnWindow(io, ms);
+        return .none;
+    };
     if (ready == 0) return .none;
 
     var buf: [32]u8 = undefined;
-    const n = std.posix.read(0, &buf) catch return .none;
-    if (n == 0) return .eof;
+    const n = std.posix.read(0, &buf) catch {
+        burnWindow(io, ms);
+        return .none;
+    };
+    if (n == 0) {
+        // A closed stdin reports readable forever, so poll answered at once
+        // and the pacing window was lost; burn it before reporting .eof, or
+        // a key loop on a closed stdin would spin at full speed.
+        burnWindow(io, ms);
+        return .eof;
+    }
     var len: usize = n;
 
     // An escape sequence may arrive split across writes; collect the rest.
@@ -125,6 +149,13 @@ pub fn readKey(ms: i32) Key {
         }
     }
     return parseKey(buf[0..len]);
+}
+
+/// Key loops pace their ticks on readKey's poll window, so a no-key outcome
+/// that surfaced early — a closed stdin or a broken handle — sleeps the rest
+/// of the window out before returning, keeping the caller's cadence.
+fn burnWindow(io: std.Io, ms: i32) void {
+    if (ms > 0) io.sleep(.fromMilliseconds(@intCast(ms)), .awake) catch {};
 }
 
 /// True when stdin has bytes within `ms`.
@@ -233,4 +264,41 @@ test "sequenceComplete tells whole keystrokes from split ones" {
     try std.testing.expect(!sequenceComplete("\x1b"));
     try std.testing.expect(sequenceComplete("x"));
     try std.testing.expect(!sequenceComplete(""));
+}
+
+test "readKey keeps the tick pacing on a closed stdin" {
+    // Windows console reads do not EOF like POSIX pipes; the fix is shared
+    // and the POSIX side is what CI runs. The libc fd calls below are
+    // pruned from non-POSIX compiles, keeping Windows test builds intact.
+    if (@import("builtin").os.tag == .windows) return error.SkipZigTest;
+
+    const C = struct {
+        extern "c" fn pipe(fds: *[2]std.posix.fd_t) c_int;
+        extern "c" fn dup(fd: std.posix.fd_t) std.posix.fd_t;
+        extern "c" fn dup2(oldfd: std.posix.fd_t, newfd: std.posix.fd_t) c_int;
+        extern "c" fn close(fd: std.posix.fd_t) c_int;
+    };
+
+    // Repoint stdin at a pipe whose writer is gone. poll reports such an fd
+    // readable forever, so readKey would answer .eof instantly and the
+    // caller's key loop — record's tick loop — would spin with no pacing.
+    var pipe_fds: [2]std.posix.fd_t = undefined;
+    if (C.pipe(&pipe_fds) != 0) return error.SkipZigTest;
+    const saved_stdin = C.dup(0);
+    defer _ = C.close(saved_stdin);
+    defer _ = C.close(pipe_fds[0]);
+    if (C.dup2(pipe_fds[0], 0) != 0) return error.SkipZigTest;
+    defer _ = C.dup2(saved_stdin, 0);
+    _ = C.close(pipe_fds[1]);
+
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    const io = threaded.io();
+
+    const t0 = std.Io.Timestamp.now(io, .awake);
+    try std.testing.expectEqual(Key.eof, readKey(io, 50));
+    try std.testing.expectEqual(Key.eof, readKey(io, 50));
+    const waited_ns = std.Io.Timestamp.now(io, .awake).nanoseconds - t0.nanoseconds;
+    // Two 50 ms windows: an unbounded loop answers in microseconds; even a
+    // heavily loaded runner stays far above a single window.
+    try std.testing.expect(waited_ns > 80 * std.time.ns_per_ms);
 }

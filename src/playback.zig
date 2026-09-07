@@ -238,7 +238,7 @@ fn playInteractive(
 
         draw(io, gpa, &frame, state, p.positionSec(), duration_sec, peak_view.items, mark_in, mark_out, note, color);
 
-        const key = keys.readKey(tick_ms);
+        const key = keys.readKey(io, tick_ms);
         if (key == .none) continue :keys; // no key: the notice stays up
         note = null;
 

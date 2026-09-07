@@ -145,7 +145,7 @@ pub fn recordOnce(
     var encoded_len: usize = 0;
 
     loop: while (true) {
-        switch (keys.readKey(tick_ms)) {
+        switch (keys.readKey(io, tick_ms)) {
             .byte => |c| switch (c) {
                 ' ' => {
                     const now = std.Io.Timestamp.now(io, .awake);
