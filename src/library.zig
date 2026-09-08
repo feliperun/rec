@@ -5,6 +5,10 @@ const wav = @import("wav.zig");
 
 pub const recordings_dir = "recordings";
 
+/// The selection a verb falls back to when none is given: the newest
+/// recording, index 1 of the newest-first order `list` shows.
+pub const latest_selection = "1";
+
 /// The recording format of the platform, behind one facade so no caller
 /// branches on the OS (see docs/adr/0012): M4A/AAC through the system
 /// encoder on macOS — where it ships — plain 16-bit WAV everywhere else,

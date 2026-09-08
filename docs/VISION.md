@@ -25,7 +25,8 @@ every subcommand maps to one verb (record, list, play, transcribe).
 - Single binary, zero runtime deps beyond the OS — if the system can do it,
   shell out or link the framework instead of reimplementing.
 - Recordings are plain files under `~/recordings/`, never app-managed storage.
-- One verb per subcommand; the interactive menu is sugar, not a TUI framework.
+- One verb per subcommand; bare `rec` is the most common verb (record), and
+  the latest recording is the default subject — no TUI framework, no menu.
 
 ## Near-term horizon
 

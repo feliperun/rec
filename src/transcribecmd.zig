@@ -7,10 +7,11 @@ const record = @import("record.zig");
 const transcribe = @import("transcribe.zig");
 
 const usage =
-    \\Usage: rec transcribe <index|filename> [--language lg] [--out path]
+    \\Usage: rec transcribe [index|filename] [--language lg] [--out path]
     \\                       [--no-refine] [--context text]
     \\
-    \\Transcribes a recording via Deepgram and refines it with the configured LLM.
+    \\Transcribes a recording (the latest when none is named) via Deepgram and
+    \\refines it with the configured LLM.
     \\
 ;
 
@@ -37,10 +38,10 @@ const TranscribeArgs = union(enum) {
 };
 
 /// Pure argument parsing for `transcribe` (kept free of I/O so tests stay
-/// offline): the first non-flag token is the selection, flags consume the
-/// following token (--no-refine takes none) and keep their last occurrence,
-/// and anything else — unknown flags, missing values, extra positionals — is
-/// invalid.
+/// offline): the first non-flag token is the selection (the latest
+/// recording when there is none), flags consume the following token
+/// (--no-refine takes none) and keep their last occurrence, and anything
+/// else — unknown flags, missing values, extra positionals — is invalid.
 fn parseTranscribeArgs(args: []const [:0]const u8) TranscribeArgs {
     var parsed = TranscribeSelection{ .selection = "", .language = default_language };
     var seen_selection = false;
@@ -67,7 +68,7 @@ fn parseTranscribeArgs(args: []const [:0]const u8) TranscribeArgs {
             return .invalid;
         }
     }
-    if (!seen_selection) return .invalid;
+    if (!seen_selection) parsed.selection = library.latest_selection;
     return .{ .ok = parsed };
 }
 
@@ -463,9 +464,12 @@ test "transcribe args: refinement defaults off and flags parse together" {
     try std.testing.expectEqualStrings("b", repeated.context.?);
 }
 
-test "transcribe args: rejects a missing selection" {
-    try transcribeArgsInvalid(&.{});
-    try transcribeArgsInvalid(&.{ "--language", "en" });
+test "transcribe args: a missing selection means the latest recording" {
+    const bare = try transcribeArgsOk(&.{});
+    try std.testing.expectEqualStrings(library.latest_selection, bare.selection);
+    const flags_only = try transcribeArgsOk(&.{ "--language", "en" });
+    try std.testing.expectEqualStrings(library.latest_selection, flags_only.selection);
+    try std.testing.expectEqualStrings("en", flags_only.language);
 }
 
 test "flattenTail collapses curl's multiline stderr into one line" {

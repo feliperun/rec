@@ -14,26 +14,29 @@ no Electron, no servers of its own.
 <img src="docs/demo.gif" alt="rec recording with a live waveform, then playing back, cutting a region out with two anchors and a confirmed delete, and listing the library" width="100%">
 
 ```
-$ rec list
-  #  name                 time  size
-  1  20260826-093000.m4a  42:15   38.9 MiB
-  2  20260825-140000.m4a  55:30   50.8 MiB
+$ rec                      # records until ESC or Ctrl-C
+Saved ~/recordings/20260826-093000.m4a (42:15, 38.9 MiB)
 
-$ rec transcribe 1 --context "sprint planning for the payments team"
+$ rec transcribe --context "sprint planning for the payments team"
 Transcript saved to ~/recordings/20260826-093000.md
 Refinando com Claude Code...
 Transcrição refinada: ~/recordings/20260826-093000.md
 
-$ rec format 1
+$ rec format
 format: processando com Claude Code...
 Documento salvo em ~/recordings/20260826-093000.meeting.md
 ```
 
+Every verb that takes a recording defaults to the latest one, so the daily
+loop is `rec` → `rec transcribe` → `rec format` with nothing to look up.
+
 ## Why you might like it
 
-- **Zero-friction capture** — `rec` opens the mic immediately; recordings
-  land in `~/recordings/` as real M4A files on macOS (encoded by the OS's own
-  AudioToolbox codec) or WAV elsewhere ([ADR 0012](docs/adr/0012-recording-format-per-platform.md)).
+- **Zero-friction capture** — `rec` alone opens the mic immediately;
+  recordings land in `~/recordings/` as real M4A files on macOS (encoded by
+  the OS's own AudioToolbox codec) or WAV elsewhere ([ADR 0012](docs/adr/0012-recording-format-per-platform.md)).
+  `rec play`, `rec transcribe` and `rec format` act on the latest recording
+  unless you name another.
 - **Honest transcripts** — Deepgram nova-3 diarization rendered as clean,
   plain-prose OKF markdown: YAML frontmatter for machines, readable
   paragraphs for humans.
@@ -108,20 +111,25 @@ validates your exact harness+model pick once more, and saves it to
 ### record
 
 ```sh
-rec record [--duration <sec>]
+rec [--duration <sec>]          # the default verb
+rec record [--duration <sec>]   # the same, spelled out
 ```
 
 Records from the default microphone to `~/recordings/YYYYMMDD-HHMMSS.m4a`
 (AAC-LC, 48 kHz, stereo, via AudioToolbox); `~/recordings/` is created on
 demand. Without `--duration`, recording stops on Ctrl-C or `ESC`; with
 `--duration <sec>` it stops automatically. On a terminal, a live view opens on
-the alternate screen: a ticking timer and a multi-row waveform — the sound as
-it happens, drawn with half-block characters at the terminal's width, colored
-as a VU meter (green quiet, yellow loud, red peaking). `SPACE` pauses and
-resumes; paused audio is dropped, so the file keeps only what you meant to
-record. Your scrollback stays clean and resizing the window mid-recording
-never scrambles the display. The container is always finalized — a failed
-encode leaves no partial file behind.
+the alternate screen: a ticking timer and the sound as it happens, scrolling
+in from the right edge like a seismograph over a time ruler that moves with
+it. The waveform is a mirrored scope drawn at eighth-of-a-row resolution:
+the RMS energy glows as a bright core inside the dimmer peak envelope, and
+the rows climb a VU ramp — speech stays blue and cyan, only loud audio
+reaches the yellow and red rows. The grid takes as many rows as your
+terminal affords (4 to 12). `SPACE` pauses and resumes; paused audio is
+dropped, so the file keeps only what you meant to record. Your scrollback
+stays clean and resizing the window mid-recording never scrambles the
+display. The container is always finalized — a failed encode leaves no
+partial file behind.
 
 Recordings of at least 10 seconds warn after saving if the audio stayed very
 quiet (below −40 dBFS RMS in every measured window). The file is preserved.
@@ -146,20 +154,21 @@ Both `.m4a` and pre-existing `.wav` recordings are listed.
 ### play
 
 ```sh
-rec play <index|filename>
+rec play [index|filename]
 ```
 
 Plays a recording through the default output device, in-process: the file is
 decoded once and the same PCM feeds the waveform and the speaker. The
 selection can be an index from `list` or a filename (with or without the
-`recordings/` prefix).
+`recordings/` prefix); with none, the latest recording plays.
 
-On a terminal, playback is interactive: the same live view as the recorder —
-a multi-row waveform opening at the terminal's width — plus a bright cursor
-column walking over it at the playback position (on the alternate screen).
-The part already played is bright, the rest dimmed, and a marked region shows
-in reverse video between its two full-height anchor cursors. When the
-recording has a transcript (`NAME.md`) it is printed in full first. Keys:
+On a terminal, playback is interactive: the whole recording fitted to the
+terminal's width as the same layered waveform the recorder draws, a time
+ruler under it, and a playhead line walking over it at the playback position
+(on the alternate screen). The part already played is in color, the rest
+gray; a region marked for cutting turns magenta between its two thin anchor
+lines, so you see exactly what goes before you confirm. When the recording
+has a transcript (`NAME.md`) it is printed in full first. Keys:
 
 | Key | Action |
 |-----|--------|
@@ -183,7 +192,7 @@ Off a terminal (piped output), playback runs to completion; `Ctrl-C` stops it.
 ### transcribe
 
 ```sh
-rec transcribe <index|filename> [--language <code>] [--out <path>]
+rec transcribe [index|filename] [--language <code>] [--out <path>]
                [--no-refine] [--context <text>]
 ```
 
@@ -191,7 +200,7 @@ Transcribes a recording through Deepgram's pre-recorded API and saves an
 [Open Knowledge Format](https://cloud.google.com/blog/products/data-analytics/how-the-open-knowledge-format-can-improve-data-sharing)
 markdown file next to the recording (`NAME.m4a` → `NAME.md`; M4A goes over
 the wire as `audio/mp4`, legacy WAV as `audio/wav`). The selection resolves
-exactly like `play`. The spoken language is detected automatically and saved in
+exactly like `play`, the latest recording included. The spoken language is detected automatically and saved in
 the transcript metadata. `--language <code>` forces a language (for example,
 `pt-BR` or `en`); `--language auto` restores detection. A mismatched language can
 produce an empty transcript even when the recording contains clear speech.
@@ -211,12 +220,13 @@ its frontmatter.
 ### format
 
 ```sh
-rec format <index|filename|path> [--template meeting] [--out <path>] [--context <text>]
+rec format [index|filename|path] [--template meeting] [--out <path>] [--context <text>]
 ```
 
 Turns an existing transcript into a structured document with a prompt
-template. Without `--out`, the result lands beside the source named after
-the template:
+template — the latest recording's transcript when no selection is given.
+Without `--out`, the result lands beside the source named after the
+template:
 
 ```
 ~/recordings/planning.m4a → planning.md → planning.meeting.md
@@ -269,25 +279,23 @@ invocation. rec also checks on its own, silently, at most once a day before
 running any other command, and only speaks up when it updated itself — no
 network, no noise ([ADR 0014](docs/adr/0014-self-update-from-github-releases.md)).
 
-### Interactive mode
+### help
 
-Running `rec` with no subcommand enters a minimal interactive menu:
-
-- `r` — start recording (`SPACE` pauses, `ESC` or Ctrl-C stops)
-- `l` — list recordings
-- `<number>` + Enter — play that recording
-- `q` — quit
-
-Raw terminal mode is restored on exit, including after Ctrl-C.
+```sh
+rec help        # also: rec --help, rec -h
+```
 
 ### Colors
 
-The live views (record, play), the `list` table, and the interactive menu are
-colored on a terminal: the waveform columns are a VU meter (green → yellow →
-red), the playback cursor is a bright white column, the ⏺ recording dot is
-red, the ▶/⏸ playback state is green/yellow, and secondary text is dimmed.
-Piped output carries no ANSI codes, so scripts can keep grepping it; set
-`NO_COLOR` to opt out on a terminal too (the waveform shape and cursor stay).
+The live views (record, play) and the `list` table are colored on a
+terminal: the waveform rows climb a VU ramp from the midline outward (blue →
+cyan → green → yellow → red) with the RMS core brighter than the peak halo,
+the unplayed part is gray, a marked region is magenta, the playhead is a
+line in your terminal's default color, the ⏺ recording dot is red, the ▶/⏸
+playback state is green/yellow, and secondary text is dimmed. Piped output
+carries no ANSI codes, so scripts can keep grepping it; set `NO_COLOR` to
+opt out on a terminal too (the waveform shape, the ruler and the playhead
+stay; the unplayed part dims instead of graying).
 
 ## Build from source
 
@@ -337,8 +345,8 @@ mode (see `.github/workflows/release.yml`).
 - **Prompts** — `src/prompts.zig` embeds the bundled templates verbatim in
   the binary; composition fills `{{DOMAIN_CONTEXT}}` and delimits the
   transcript payload.
-- **TUI** — `src/tui.zig` handles raw mode for the interactive menu and
-  restores it on any exit path.
+- **Keys** — `src/keys.zig` owns raw mode for the live views and restores
+  the cooked terminal on any exit path.
 
 See [`docs/SPEC.md`](docs/SPEC.md) for the functional specification.
 

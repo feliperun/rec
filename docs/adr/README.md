@@ -56,7 +56,8 @@ proposed → active → superseded
 | [0008](0008-finalize-recordings-incrementally-and-atomically.md) | Finalize recordings incrementally and atomically | active |
 | [0009](0009-alternate-screen-live-views.md) | Draw live views on the alternate screen | active |
 | [0010](0010-play-audio-in-process.md) | Play audio in-process instead of spawning afplay | active |
-| [0011](0011-waveform-half-block-grid.md) | Render waveforms as a multi-row half-block grid | active |
+| [0011](0011-waveform-half-block-grid.md) | Render waveforms as a multi-row half-block grid | superseded |
 | [0012](0012-recording-format-per-platform.md) | Recording format follows the platform: M4A on macOS, WAV elsewhere | active |
 | [0013](0013-cross-platform-builds.md) | Cross-platform builds: one zig toolchain, three native test runners | active |
 | [0014](0014-self-update-from-github-releases.md) | Self-update from GitHub Releases | active |
+| [0015](0015-layered-eighth-block-waveform.md) | Layered eighth-block waveform with a scrolling recorder and a time ruler | active |

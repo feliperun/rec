@@ -18,8 +18,9 @@ them back — without leaving the terminal and without hand-rolled device code.
   terminal `SPACE` pauses and resumes, and paused audio is dropped (the file
   keeps only recorded time). The file must be a complete, finalized container
   even on interrupt, and a failed encode must leave no partial file behind.
-- While recording, show a live view on a terminal: elapsed time plus a
-  multi-row waveform of the sound as it happens.
+- While recording, show a live view on a terminal: elapsed time plus the
+  sound as it happens — a layered waveform scrolling in from the right edge
+  over a time ruler that moves with it.
 
 ### FR2 — List
 - `rec list` prints the recordings in `~/recordings/` with index,
@@ -28,13 +29,14 @@ them back — without leaving the terminal and without hand-rolled device code.
   directory prints a friendly empty state, not a crash.
 
 ### FR3 — Play
-- `rec play <index|filename>` plays a recording through the default output
+- `rec play [index|filename]` plays a recording through the default output
   device in-process: the recording is decoded to canonical PCM once and the
   same samples feed the waveform and the speaker (miniaudio playback).
-- On a terminal playback is interactive: a multi-row waveform opens at the
-  terminal width with a playhead cursor. `SPACE` pauses/resumes; `←`/`→`
-  seek ±1 s and `SHIFT`+`←`/`→` seek ±5 s; `I`/`O` anchor the region to cut
-  (two full-height cursors with the span reversed between them), `DELETE`
+- On a terminal playback is interactive: the whole recording is fitted to
+  the terminal width as a layered waveform over a time ruler, with a
+  playhead line. `SPACE` pauses/resumes; `←`/`→` seek ±1 s and
+  `SHIFT`+`←`/`→` seek ±5 s; `I`/`O` anchor the region to cut (two anchor
+  lines with the span recolored between them), `DELETE`
   asks for confirmation and `ENTER` cuts it out in place (any other key
   cancels) — playback continues on the shortened recording with a note
   confirming the cut —, `R` resets the anchors, `T` transcribes the
@@ -42,13 +44,15 @@ them back — without leaving the terminal and without hand-rolled device code.
 - Off a terminal, playback runs to completion and is interruptible with
   `Ctrl-C`.
 
-### FR4 — Interactive mode
-- Running `rec` with no subcommand enters a minimal interactive menu:
-  `r` start recording · `l` list · `<number>` + Enter plays · `q` quit.
+### FR4 — Implied verb and implied selection
+- Running `rec` with no subcommand records; a leading flag (`rec --duration
+  5`) belongs to record. `rec help`/`--help`/`-h` print the usage.
+- `play`, `transcribe`, and `format` act on the latest recording when no
+  selection is given (index 1 of the newest-first order `list` shows).
 - Raw terminal mode is restored on exit even after Ctrl-C (no broken terminal).
 
 ### FR5 — Transcribe
-- `rec transcribe <index|filename>` resolves the selection exactly like
+- `rec transcribe [index|filename]` resolves the selection exactly like
   `play` and sends the recording to the Deepgram pre-recorded API through
   `/usr/bin/curl` as a child process — M4A as `audio/mp4`, legacy WAV as
   `audio/wav`.
@@ -86,7 +90,7 @@ them back — without leaving the terminal and without hand-rolled device code.
   context.
 
 ### FR8 — Format via user templates (`format`)
-- `rec format <index|filename|path>` transforms a transcript markdown using
+- `rec format [index|filename|path]` transforms a transcript markdown using
   a named prompt template: user-editable files under `<config dir>/templates/`,
   created on first use from copies embedded in the binary (`meeting` is the
   structuring template behind the default; `refine` backs FR7). Embedded

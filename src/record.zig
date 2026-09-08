@@ -3,27 +3,27 @@ const capture = @import("capture.zig");
 const keys = @import("keys.zig");
 const library = @import("library.zig");
 const live = @import("live.zig");
+const ruler = @import("ruler.zig");
 const style = @import("style.zig");
 const waveform = @import("waveform.zig");
 
 /// How often the live view redraws, in ms — also the keystroke poll window.
 const tick_ms = 100;
 
-/// The record command body, shared by the CLI and the interactive 'r' key:
-/// captures the microphone and encodes
+/// The record command body: captures the microphone and encodes
 /// $HOME/recordings/YYYYMMDD-HHMMSS<library.recording.ext> (the platform recording
 /// format) until the duration elapses, Ctrl-C, or ESC. SPACE pauses and
 /// resumes — paused audio is dropped, so the recording keeps only what was
-/// played. On a terminal the live view (status + waveform grid) runs on the
-/// alternate screen. Returns the exit code.
+/// played. On a terminal the live view (status, the scrolling waveform,
+/// its time ruler) runs on the alternate screen. Returns the exit code.
 pub fn recordOnce(
     io: std.Io,
     gpa: std.mem.Allocator,
     duration_sec: ?f64,
     recordings_path: []const u8,
 ) u8 {
-    // Reset the per-recording flag before installing the handler, so a prior
-    // Ctrl-C (for example from the interactive menu) cannot stop this run.
+    // Reset the per-recording flag before installing the handler, so a stale
+    // stop request cannot end this run.
     capture.resetStop();
     installSigintHandler();
 
@@ -125,15 +125,15 @@ pub fn recordOnce(
     const started_at = std.Io.Timestamp.now(io, .awake);
     const duration_ns: ?i128 = if (duration_sec) |sec| durationNanoseconds(sec) else null;
 
-    // The live view: peaks accumulate from whatever the audio thread has
+    // The live view: blocks accumulate from whatever the audio thread has
     // appended since the last tick.
     const byte_rate: u64 = @as(u64, rec.sample_rate) * rec.channels * 2;
-    var tracker = waveform.PeakTracker.init(gpa, waveform.peakBlockBytes(byte_rate));
+    var tracker = waveform.Tracker.init(gpa, waveform.peakBlockBytes(byte_rate));
     defer tracker.deinit();
     var new_pcm: std.ArrayList(u8) = .empty;
     defer new_pcm.deinit(gpa);
-    var peak_view: std.ArrayList(waveform.Peak) = .empty;
-    defer peak_view.deinit(gpa);
+    var block_view: std.ArrayList(waveform.Block) = .empty;
+    defer block_view.deinit(gpa);
     var consumed: usize = 0;
 
     // Watches what the encoder actually gets, so the audibility verdict
@@ -197,7 +197,7 @@ pub fn recordOnce(
 
         // readKey's poll window is the tick pacing; no extra sleep.
         const secs: u32 = @intCast(@divTrunc(active, std.time.ns_per_s));
-        printLiveView(io, gpa, &frame, secs, paused, tracker.view(&peak_view) catch &.{}, &screen, view_tty, color);
+        printLiveView(io, gpa, &frame, secs, paused, tracker.view(&block_view) catch &.{}, &screen, view_tty, color);
     }
 
     rec.stop();
@@ -326,16 +326,21 @@ fn publish(
 }
 
 /// Where the live view stands on the alternate screen: the header sits on
-/// row 1 (redrawn when the width changes, since it may wrap differently),
-/// the status line and the waveform grid below it.
+/// row 1 (redrawn when the geometry changes, since it may wrap
+/// differently), the status line, the waveform grid and its ruler below it.
 const LiveView = struct {
     /// The header, composed with color, no trailing newline.
     header: []const u8,
     /// Display cells of the plain header text.
     header_cells: usize,
-    /// Width the header was last drawn at.
+    /// Geometry the view was last drawn at; zero before the first draw.
     width: usize = 0,
+    height: usize = 0,
 };
+
+/// Rows the recorder's chrome takes besides the header: the status line
+/// and the ruler's two rows.
+const chrome_rows = 3;
 
 fn onSigint(sig: std.posix.SIG) callconv(.c) void {
     _ = sig;
@@ -421,27 +426,29 @@ fn durationNanoseconds(sec: f64) i96 {
 
 /// Draws the live view, composing everything into `frame` and writing it
 /// once. On a tty: absolutely positioned on the alternate screen behind a
-/// synchronized-update bracket — the header on row 1 (redrawn whenever the
-/// width changes, since it may wrap differently), the status line and the
-/// waveform grid below it; whatever a resize did to the grid is overwritten
-/// by this tick, and the single write keeps the view flicker-free. Off a
-/// tty: a plain single line, carriage-returned over the previous one, with
-/// a one-row slice of the waveform as the meter.
+/// synchronized-update bracket — the header on row 1, the status line, the
+/// waveform grid scrolling in from the right edge (the newest block is the
+/// last column), and the time ruler under it. A geometry change erases the
+/// screen and redraws the header, so whatever a resize did to the grid is
+/// gone by this tick, and the single write keeps the view flicker-free. Off
+/// a tty: a plain single line, carriage-returned over the previous one,
+/// with a one-row strip of the wave as the meter.
 fn printLiveView(
     io: std.Io,
     gpa: std.mem.Allocator,
     frame: *std.ArrayList(u8),
     secs: u32,
     paused: bool,
-    peaks: []const waveform.Peak,
+    blocks: []const waveform.Block,
     screen: *LiveView,
     tty: bool,
     color: bool,
 ) void {
-    const width = @min(waveform.termWidth(), waveform.max_columns);
+    const size = waveform.termSize();
+    const width = @min(size.cols, waveform.max_columns);
     var esc: [16]u8 = undefined;
     var line: [waveform.rowBufferLen(waveform.max_columns)]u8 = undefined;
-    var fractions: [waveform.max_columns]u8 = undefined;
+    var columns: [waveform.max_columns]waveform.Column = undefined;
 
     frame.clearRetainingCapacity();
     const put = struct {
@@ -454,15 +461,9 @@ fn printLiveView(
         put(frame, gpa, "\r\x1b[2K");
         var cells: usize = 0;
         put(frame, gpa, composeStatus(&line, secs, paused, color, &cells));
-        const bar_width = width -| cells;
-        const fr = waveform.columnFractions(peaks, fractions[0..bar_width]);
-        put(frame, gpa, waveform.renderRow(
-            fr,
-            waveform.view_height,
-            waveform.view_height / 2,
-            .{ .color = color },
-            &line,
-        ));
+        const strip_width = width -| cells;
+        const cols = waveform.layoutColumns(blocks, columns[0..strip_width], .tail);
+        put(frame, gpa, waveform.renderStrip(cols, &line));
         printStderr(io, frame.items);
         return;
     }
@@ -470,20 +471,15 @@ fn printLiveView(
     put(frame, gpa, live.sync_begin);
 
     const header_rows = live.rowsSpanned(screen.header_cells, width);
-    if (width != screen.width) {
-        // Erase the whole previous view — header, status, and grid rows —
-        // then redraw the header; the rest follows below it.
-        if (screen.width != 0) {
-            const last = 1 + live.rowsSpanned(screen.header_cells, screen.width) + waveform.view_height;
-            var row: usize = 1;
-            while (row <= last) : (row += 1) {
-                put(frame, gpa, live.moveTo(&esc, row, 1));
-                put(frame, gpa, live.clearLine(&esc));
-            }
-        }
+    const height = waveform.viewHeight(size.rows -| (header_rows + chrome_rows));
+    if (width != screen.width or height != screen.height) {
+        // Erase the whole previous view, then redraw the header; the rest
+        // follows below it every tick.
+        put(frame, gpa, live.clearScreen(&esc));
         put(frame, gpa, live.moveTo(&esc, 1, 1));
         put(frame, gpa, screen.header);
         screen.width = width;
+        screen.height = height;
     }
 
     const status_row = 1 + header_rows;
@@ -492,13 +488,29 @@ fn printLiveView(
     var cells: usize = 0;
     put(frame, gpa, composeStatus(&line, secs, paused, color, &cells));
 
-    const fr = waveform.columnFractions(peaks, fractions[0..width]);
+    const cols = waveform.layoutColumns(blocks, columns[0..width], .tail);
     var r: usize = 0;
-    while (r < waveform.view_height) : (r += 1) {
+    while (r < height) : (r += 1) {
         put(frame, gpa, live.moveTo(&esc, status_row + 1 + r, 1));
         put(frame, gpa, live.clearLine(&esc));
-        put(frame, gpa, waveform.renderRow(fr, waveform.view_height, r, .{ .color = color }, &line));
+        put(frame, gpa, waveform.renderRow(cols, height, r, .{ .color = color }, &line));
     }
+
+    // The ruler scrolls with the wave: the last column is the newest block,
+    // so column 0 sits `width` blocks before it — before time zero while
+    // the recording is younger than the grid is wide.
+    const axis = ruler.Axis{
+        .origin_ms = (@as(i64, @intCast(blocks.len)) - @as(i64, @intCast(width))) * @as(i64, waveform.peak_block_ms),
+        .ms_per_col = @floatFromInt(waveform.peak_block_ms),
+    };
+    put(frame, gpa, live.moveTo(&esc, status_row + 1 + height, 1));
+    put(frame, gpa, live.clearLine(&esc));
+    if (color) put(frame, gpa, style.dim);
+    put(frame, gpa, ruler.renderTicks(&line, width, axis));
+    put(frame, gpa, live.moveTo(&esc, status_row + 2 + height, 1));
+    put(frame, gpa, live.clearLine(&esc));
+    put(frame, gpa, ruler.renderLabels(&line, width, axis));
+    if (color) put(frame, gpa, style.reset);
 
     put(frame, gpa, live.sync_end);
     printStderr(io, frame.items);

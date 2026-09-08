@@ -40,6 +40,12 @@ pub fn clearLine(buf: []u8) []const u8 {
     return buf[0..append(buf, "\x1b[2K", 0)];
 }
 
+/// Erases the whole screen: what a view emits when its geometry changed
+/// and the rows it used to own may no longer be the rows it draws.
+pub fn clearScreen(buf: []u8) []const u8 {
+    return buf[0..append(buf, "\x1b[2J", 0)];
+}
+
 /// Rows a line of `cols` display columns occupies on a terminal `term_cols`
 /// columns wide: the row holding its last column, counting each full-width
 /// chunk as a wrap. An exact multiple does not add a row — the cursor stays
@@ -89,6 +95,7 @@ test "alt screen and cursor positioning sequences" {
     // Leaving restores it before dropping the alternate screen.
     try std.testing.expectEqualStrings("\x1b[?25h\x1b[?1049l", leave(&buf));
     try std.testing.expectEqualStrings("\x1b[2K", clearLine(&buf));
+    try std.testing.expectEqualStrings("\x1b[2J", clearScreen(&buf));
     try std.testing.expectEqualStrings("\x1b[1;1H", moveTo(&buf, 1, 1));
     try std.testing.expectEqualStrings("\x1b[12;34H", moveTo(&buf, 12, 34));
     // One bracketed frame update: terminals that understand it batch the

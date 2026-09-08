@@ -11,7 +11,7 @@
 | Transport / OS boundary | `capture.zig`, `player.zig`, `transcribe.zig` | Wrap one external producer/consumer (input device, output device, HTTP) |
 | Format | `wav.zig`, `okf.zig` | Encode/decode one on-disk format each; no policy |
 | Domain | `library.zig` | The recordings collection: scan, sort, resolve `index|filename` selections |
-| Presentation | `main.zig`, `tui.zig` | CLI surface and interactive menu over the same verbs |
+| Presentation | `main.zig`, `record.zig`, `playback.zig` | CLI surface and the live views over the same verbs |
 
 ## External systems
 
@@ -26,8 +26,9 @@
 
 - A recording file on disk is always **complete** — headers finalized even when
   recording is interrupted (Ctrl-C included).
-- Selection resolution (`index|filename`) is identical for `play` and
-  `transcribe`; `library.zig` is the only place that implements it.
+- Selection resolution (`index|filename`) is identical for `play`,
+  `transcribe`, and `format`, and every one of them defaults to the latest
+  recording; `library.zig` is the only place that implements it.
 - Child processes are always reaped; interrupts forwarded, no zombies.
 - Raw terminal mode is restored on every exit path.
 - User-facing failures are one `rec <verb>: message` line on stderr + exit 1.
