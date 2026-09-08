@@ -1,5 +1,26 @@
 # Changelog
 
+## [2.0.0](https://github.com/feliperun/rec/compare/v1.8.2...v2.0.0) (2026-09-08)
+
+
+### ⚠ BREAKING CHANGES
+
+* bare `rec` records instead of opening the interactive menu; the menu and its keys (r, l, number+Enter, q) no longer exist.
+* transcription now detects language by default. Pass --language pt-BR to retain the previous forced Portuguese behavior.
+
+### Features
+
+* bare rec records; play, transcribe and format default to the latest ([23928b7](https://github.com/feliperun/rec/commit/23928b7cff7fb8a7b5934a9cd5d2c4f8e5abaaed))
+* layered eighth-block waveform with a scrolling recorder and a time ruler ([29d6f49](https://github.com/feliperun/rec/commit/29d6f4948359c5ef098a33aeb072423e321b4ca3))
+* warn when a recording captured nothing audible ([af8725f](https://github.com/feliperun/rec/commit/af8725fbb01fb1124731f37ab4924652b258028c))
+
+
+### Bug Fixes
+
+* detect spoken language instead of forcing Portuguese ([ecdb0a7](https://github.com/feliperun/rec/commit/ecdb0a73c7c7a9c977ddb0095367c0c119195e25))
+* detect spoken language instead of forcing Portuguese ([abff665](https://github.com/feliperun/rec/commit/abff6651b63a79324aa658bfb56aadeb5c3787b3))
+* pace the record key loop when stdin is closed ([236361f](https://github.com/feliperun/rec/commit/236361fc2da8f0db82db5a7e5fb669035e5bf64a))
+
 ## [1.8.2](https://github.com/feliperun/rec/compare/v1.8.1...v1.8.2) (2026-09-05)
 
 
