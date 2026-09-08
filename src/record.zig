@@ -225,12 +225,11 @@ pub fn recordOnce(
 const Outcome = union(enum) { none, saved: struct { dur_csec: u64, bytes: u64 }, failed: []const u8 };
 
 const dead_capture_warning =
-    "warning: no audible sound was captured (check the input device and its volume, then record again)\n";
+    "warning: recorded audio stayed very quiet (check the input device and its volume before recording again; transcription may miss speech)\n";
 
 /// A second of audio whose RMS stays under this level (s16 linear, -40 dBFS)
-/// carries no transcribable signal: the dead captures that later produced
-/// `no speech found` at transcribe time sat at -43..-55 dBFS, while real
-/// speech lands at -20..-30 dBFS.
+/// triggers a low-level warning. Signal level alone cannot establish whether
+/// speech is present or intelligible; this is not a voice activity detector.
 const audibility_floor: f64 = 32768.0 * std.math.pow(f64, 10.0, -40.0 / 20.0);
 
 /// How long a recording must run before the dead-capture verdict is offered,

@@ -123,6 +123,11 @@ record. Your scrollback stays clean and resizing the window mid-recording
 never scrambles the display. The container is always finalized — a failed
 encode leaves no partial file behind.
 
+Recordings of at least 10 seconds warn after saving if the audio stayed very
+quiet (below −40 dBFS RMS in every measured window). The file is preserved.
+Check the selected input and its volume, then listen to a short test recording
+before starting a longer session. This level check does not detect speech.
+
 | Key | Action |
 |-----|--------|
 | `SPACE` | Pause / resume (paused audio is discarded) |
@@ -186,8 +191,11 @@ Transcribes a recording through Deepgram's pre-recorded API and saves an
 [Open Knowledge Format](https://cloud.google.com/blog/products/data-analytics/how-the-open-knowledge-format-can-improve-data-sharing)
 markdown file next to the recording (`NAME.m4a` → `NAME.md`; M4A goes over
 the wire as `audio/mp4`, legacy WAV as `audio/wav`). The selection resolves
-exactly like `play`. `--language` passes a Deepgram language code (default
-`pt-BR`); `--out` writes elsewhere.
+exactly like `play`. The spoken language is detected automatically and saved in
+the transcript metadata. `--language <code>` forces a language (for example,
+`pt-BR` or `en`); `--language auto` restores detection. A mismatched language can
+produce an empty transcript even when the recording contains clear speech.
+`--out` writes elsewhere.
 
 Then, by default, **the refine pass runs**: the transcript travels through
 your configured LLM together with the bundled *refine* prompt, which fixes

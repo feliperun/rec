@@ -93,16 +93,13 @@ Record every failure that cost real debugging time, with the invariant that prev
 it and a link to the ADR or code that must not be undone. Highest-value part of this
 file — keep appending.
 
-- **`rec` can publish a genuinely silent M4A and print "Saved"** — the macOS input
-  chain (speaker playback bleeding into the capture device, echo cancellation and
-  ducking, Continuity input routing) can wash the signal down to −43..−55 dBFS RMS
-  while the file still plays fine; Deepgram then answers HTTP 200 with zero
-  utterances (`transcribe: no speech found`), which is **not** a transcribe or
-  writer regression. The recorder warns at publish time when every recorded second
-  stayed under the −40 dBFS RMS floor (`audibility_floor` and `LevelTracker` in
-  `src/record.zig`) — never drop that warning or tune the floor without re-measuring
-  real washes and real speech, and never treat a washed file as proof the pipeline
-  broke.
+- **Low RMS and zero Deepgram utterances do not prove silence.** A forced
+  language can suppress otherwise intelligible speech. Before blaming capture,
+  compare automatic language detection against the forced language on the same
+  unmodified file. `src/transcribe.zig` must send `detect_language=true` by default
+  and omit `language`; explicit `--language` overrides it. The regression lives
+  in `scripts/e2e_transcribe.py`. The −40 dBFS recorder warning (`LevelTracker`
+  in `src/record.zig`) is only a low-level advisory, not speech detection.
 - **A closed stdin makes `poll` report readable forever** — `keys.readKey` answered
   `.eof` instantly, so every key loop paced on the poll window (record's tick loop)
   spun at full speed with no pacing: 2.3 GB of stderr in 200 s. readKey burns the
