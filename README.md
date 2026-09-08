@@ -119,13 +119,17 @@ Records from the default microphone to `~/recordings/YYYYMMDD-HHMMSS.m4a`
 (AAC-LC, 48 kHz, stereo, via AudioToolbox); `~/recordings/` is created on
 demand. Without `--duration`, recording stops on Ctrl-C or `ESC`; with
 `--duration <sec>` it stops automatically. On a terminal, a live view opens on
-the alternate screen: a ticking timer and a multi-row waveform — the sound as
-it happens, drawn with half-block characters at the terminal's width, colored
-as a VU meter (green quiet, yellow loud, red peaking). `SPACE` pauses and
-resumes; paused audio is dropped, so the file keeps only what you meant to
-record. Your scrollback stays clean and resizing the window mid-recording
-never scrambles the display. The container is always finalized — a failed
-encode leaves no partial file behind.
+the alternate screen: a ticking timer and the sound as it happens, scrolling
+in from the right edge like a seismograph over a time ruler that moves with
+it. The waveform is a mirrored scope drawn at eighth-of-a-row resolution:
+the RMS energy glows as a bright core inside the dimmer peak envelope, and
+the rows climb a VU ramp — speech stays blue and cyan, only loud audio
+reaches the yellow and red rows. The grid takes as many rows as your
+terminal affords (4 to 12). `SPACE` pauses and resumes; paused audio is
+dropped, so the file keeps only what you meant to record. Your scrollback
+stays clean and resizing the window mid-recording never scrambles the
+display. The container is always finalized — a failed encode leaves no
+partial file behind.
 
 Recordings of at least 10 seconds warn after saving if the audio stayed very
 quiet (below −40 dBFS RMS in every measured window). The file is preserved.
@@ -158,12 +162,13 @@ decoded once and the same PCM feeds the waveform and the speaker. The
 selection can be an index from `list` or a filename (with or without the
 `recordings/` prefix); with none, the latest recording plays.
 
-On a terminal, playback is interactive: the same live view as the recorder —
-a multi-row waveform opening at the terminal's width — plus a bright cursor
-column walking over it at the playback position (on the alternate screen).
-The part already played is bright, the rest dimmed, and a marked region shows
-in reverse video between its two full-height anchor cursors. When the
-recording has a transcript (`NAME.md`) it is printed in full first. Keys:
+On a terminal, playback is interactive: the whole recording fitted to the
+terminal's width as the same layered waveform the recorder draws, a time
+ruler under it, and a playhead line walking over it at the playback position
+(on the alternate screen). The part already played is in color, the rest
+gray; a region marked for cutting turns magenta between its two thin anchor
+lines, so you see exactly what goes before you confirm. When the recording
+has a transcript (`NAME.md`) it is printed in full first. Keys:
 
 | Key | Action |
 |-----|--------|
@@ -283,11 +288,14 @@ rec help        # also: rec --help, rec -h
 ### Colors
 
 The live views (record, play) and the `list` table are colored on a
-terminal: the waveform columns are a VU meter (green → yellow →
-red), the playback cursor is a bright white column, the ⏺ recording dot is
-red, the ▶/⏸ playback state is green/yellow, and secondary text is dimmed.
-Piped output carries no ANSI codes, so scripts can keep grepping it; set
-`NO_COLOR` to opt out on a terminal too (the waveform shape and cursor stay).
+terminal: the waveform rows climb a VU ramp from the midline outward (blue →
+cyan → green → yellow → red) with the RMS core brighter than the peak halo,
+the unplayed part is gray, a marked region is magenta, the playhead is a
+line in your terminal's default color, the ⏺ recording dot is red, the ▶/⏸
+playback state is green/yellow, and secondary text is dimmed. Piped output
+carries no ANSI codes, so scripts can keep grepping it; set `NO_COLOR` to
+opt out on a terminal too (the waveform shape, the ruler and the playhead
+stay; the unplayed part dims instead of graying).
 
 ## Build from source
 

@@ -3,8 +3,8 @@
 # `rec record` while the window shrinks and grows; a minimal terminal
 # emulator replays the output under both reflow models real terminals use
 # (xterm-style rewrap, Ghostty-style clip) and asserts the view stays
-# exactly one header plus one live line. Run from the repo root, after
-# `zig build` (binary at zig-out/bin/rec).
+# exactly one header plus one status line over the wave and its ruler. Run
+# from the repo root, after `zig build` (binary at zig-out/bin/rec).
 import fcntl
 import os
 import pty
@@ -281,7 +281,9 @@ def winsize(mfd, rows, cols):
     fcntl.ioctl(mfd, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
 
 
-GRID_CHARS = set("▀▄█ ")
+# The rows under the status line: the eighth-block wave, the ruler's line
+# and ticks, and the tick labels ("0:02").
+GRID_CHARS = set("▁▂▃▄▅▆▇█ ─┬0123456789:")
 
 
 def check(screen, at):

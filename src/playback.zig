@@ -6,6 +6,7 @@ const llm = @import("llm.zig");
 const live = @import("live.zig");
 const player_mod = @import("player.zig");
 const prompts = @import("prompts.zig");
+const ruler = @import("ruler.zig");
 const style = @import("style.zig");
 const transcribecmd = @import("transcribecmd.zig");
 const waveform = @import("waveform.zig");
@@ -33,13 +34,13 @@ fn installSigint() void {
 /// `play <index|filename>`: resolves the selection against the library and
 /// plays it in-process on the default output device — the same decoded PCM
 /// the waveform is drawn from. On a terminal, playback is a live view on
-/// the alternate screen — the multi-row waveform with the playhead over it
-/// — driven by keys: SPACE pauses/resumes, ←/→ seek one second (SHIFT for
-/// five), I and O anchor the two cursors of the region to cut (drawn as
-/// full-height columns with the span reversed), DELETE asks and ENTER
-/// confirms the cut, T transcribes the recording or opens its transcript,
-/// R clears the marks, Q or Ctrl-C stops. Without a terminal it plays to
-/// completion under Ctrl-C.
+/// the alternate screen — the layered waveform over a time ruler, the
+/// playhead line over it — driven by keys: SPACE pauses/resumes, ←/→ seek
+/// one second (SHIFT for five), I and O anchor the two cursors of the
+/// region to cut (drawn as full-height lines with the wave between them
+/// recolored), DELETE asks and ENTER confirms the cut, T transcribes the
+/// recording or opens its transcript, R clears the marks, Q or Ctrl-C
+/// stops. Without a terminal it plays to completion under Ctrl-C.
 pub fn playSelection(io: std.Io, gpa: std.mem.Allocator, selection: []const u8, recordings_path: []const u8) u8 {
     var entries: std.ArrayList(library.Entry) = .empty;
     defer library.freeEntries(gpa, &entries);
@@ -149,9 +150,10 @@ const seek_step_shift_sec: f64 = 5.0;
 const PlayState = enum { playing, paused };
 
 /// Runs the live view while the player plays: the status line, the
-/// multi-row waveform (played part bright, rest dim, the marked region
-/// reversed between its two anchor cursors, playhead over everything), a
-/// notes row, and the key hints — one composed frame per tick. Owns
+/// layered waveform (played part in color, the rest gray, the marked region
+/// recolored between its two anchor lines, the playhead line over
+/// everything), its time ruler, a notes row, and the key hints — one
+/// composed frame per tick. Owns
 /// `audio`: a confirmed cut rewrites the file, reloads it, and playback
 /// continues on the new PCM with the view still up. Restores the terminal
 /// on every exit path.
@@ -200,19 +202,20 @@ fn playInteractive(
         return 1;
     };
 
-    // Peaks come from the same PCM the speaker plays, so a reload after a
+    // Blocks come from the same PCM the speaker plays, so a reload after a
     // cut redraws the view from the new body.
-    var tracker = waveform.PeakTracker.init(gpa, waveform.peakBlockBytes(audio.byteRate()));
+    var tracker = waveform.Tracker.init(gpa, waveform.peakBlockBytes(audio.byteRate()));
     defer tracker.deinit();
     tracker.feed(audio.pcm);
-    var peak_view: std.ArrayList(waveform.Peak) = .empty;
-    defer peak_view.deinit(gpa);
-    peak_view.appendSlice(gpa, tracker.peaks.items) catch {};
+    var block_view: std.ArrayList(waveform.Block) = .empty;
+    defer block_view.deinit(gpa);
+    _ = tracker.view(&block_view) catch {};
 
     // The whole view is composed here and written in one shot per tick —
     // many small writes are what made the cursor's movement flicker.
     var frame: std.ArrayList(u8) = .empty;
     defer frame.deinit(gpa);
+    var view = View{};
 
     var state: PlayState = .playing;
     var exit_code: u8 = 0;
@@ -236,7 +239,16 @@ fn playInteractive(
             break :keys;
         }
 
-        draw(io, gpa, &frame, state, p.positionSec(), duration_sec, peak_view.items, mark_in, mark_out, note, color);
+        draw(io, gpa, &frame, &view, .{
+            .state = state,
+            .elapsed_sec = p.positionSec(),
+            .duration_sec = duration_sec,
+            .blocks = block_view.items,
+            .mark_in = mark_in,
+            .mark_out = mark_out,
+            .note = note,
+            .color = color,
+        });
 
         const key = keys.readKey(io, tick_ms);
         if (key == .none) continue :keys; // no key: the notice stays up
@@ -267,10 +279,9 @@ fn playInteractive(
                     break :keys;
                 };
                 tracker.deinit();
-                tracker = waveform.PeakTracker.init(gpa, waveform.peakBlockBytes(audio.byteRate()));
+                tracker = waveform.Tracker.init(gpa, waveform.peakBlockBytes(audio.byteRate()));
                 tracker.feed(audio.pcm);
-                peak_view.clearRetainingCapacity();
-                peak_view.appendSlice(gpa, tracker.peaks.items) catch {};
+                _ = tracker.view(&block_view) catch {};
                 duration_sec = @as(f64, @floatFromInt(audio.pcm.len)) / @as(f64, @floatFromInt(audio.byteRate()));
                 p.start(audio.pcm, audio.sample_rate, @intCast(audio.channels)) catch {
                     leaveAlt(io, &alt_on, &esc_buf);
@@ -357,85 +368,122 @@ fn playInteractive(
 
 // --- the live view -----------------------------------------------------------
 
-/// Composes the whole view — the status line, the waveform grid (the
-/// playhead over it, the marked region reversed between its two anchor
-/// cursors), a notes row, and the key hints — into `frame` behind a
-/// synchronized-update bracket and writes it once. One write per tick with
-/// the hardware cursor hidden is what keeps the view from flickering while
-/// the playhead moves; the absolute positioning also overwrites whatever a
-/// resize did to the grid.
-fn draw(
-    io: std.Io,
-    gpa: std.mem.Allocator,
-    frame: *std.ArrayList(u8),
+/// Rows the player's chrome takes around the grid: the status line, the
+/// ruler's two rows, the notes row, and the key hints.
+const chrome_rows = 5;
+
+/// Geometry the view was last drawn at; zero before the first draw.
+const View = struct {
+    width: usize = 0,
+    height: usize = 0,
+};
+
+/// Everything one frame shows.
+const Frame = struct {
     state: PlayState,
     elapsed_sec: f64,
     duration_sec: f64,
-    peaks: []const waveform.Peak,
+    blocks: []const waveform.Block,
     mark_in: ?f64,
     mark_out: ?f64,
     note: ?[]const u8,
     color: bool,
-) void {
-    const width = @min(waveform.termWidth(), waveform.max_columns);
+};
+
+/// Composes the whole view — the status line, the waveform grid (the
+/// playhead line over it, the marked region recolored between its two
+/// anchor lines), the time ruler, a notes row, and the key hints — into
+/// `frame` behind a synchronized-update bracket and writes it once. One
+/// write per tick with the hardware cursor hidden is what keeps the view
+/// from flickering while the playhead moves; a geometry change erases the
+/// screen first, so whatever a resize did to the grid is gone.
+fn draw(io: std.Io, gpa: std.mem.Allocator, frame: *std.ArrayList(u8), view: *View, f: Frame) void {
+    const size = waveform.termSize();
+    const width = @min(size.cols, waveform.max_columns);
+    const height = waveform.viewHeight(size.rows -| chrome_rows);
     var esc: [16]u8 = undefined;
     var line: [waveform.rowBufferLen(waveform.max_columns)]u8 = undefined;
 
-    var fractions: [waveform.max_columns]u8 = undefined;
-    const fr = waveform.columnFractions(peaks, fractions[0..width]);
+    var columns: [waveform.max_columns]waveform.Column = undefined;
+    const cols = waveform.layoutColumns(f.blocks, columns[0..width], .fit);
 
-    const cursor = @min(playedCols(width, elapsed_sec, duration_sec), width -| 1);
-    const has_marks = cutSpan(mark_in, mark_out, duration_sec) != null;
-    const sel: ?waveform.SelRange = if (cutSpan(mark_in, mark_out, duration_sec)) |s|
-        .{ .start_col = playedCols(width, s[0], duration_sec), .end_col = playedCols(width, s[1], duration_sec) }
+    const cursor = @min(playedCols(width, f.elapsed_sec, f.duration_sec), width -| 1);
+    const has_marks = cutSpan(f.mark_in, f.mark_out, f.duration_sec) != null;
+    const sel: ?waveform.SelRange = if (cutSpan(f.mark_in, f.mark_out, f.duration_sec)) |s|
+        .{ .start_col = playedCols(width, s[0], f.duration_sec), .end_col = playedCols(width, s[1], f.duration_sec) }
     else
         null;
-    // The two anchors, drawn as full-height columns at the marked positions
+    // The two anchors, drawn as full-height lines at the marked positions
     // — the region's start and end cursors. A lone mark resolves against
     // the recording's edges, like the cut itself does.
-    const edges: ?waveform.SelRange = if (mark_in == null and mark_out == null)
+    const edges: ?waveform.SelRange = if (f.mark_in == null and f.mark_out == null)
         null
     else
         .{
-            .start_col = playedCols(width, mark_in orelse 0, duration_sec),
-            .end_col = playedCols(width, mark_out orelse duration_sec, duration_sec),
+            .start_col = playedCols(width, f.mark_in orelse 0, f.duration_sec),
+            .end_col = playedCols(width, f.mark_out orelse f.duration_sec, f.duration_sec),
         };
 
     frame.clearRetainingCapacity();
-    frame.appendSlice(gpa, live.sync_begin) catch return;
-    frame.appendSlice(gpa, live.moveTo(&esc, 1, 1)) catch return;
-    frame.appendSlice(gpa, live.clearLine(&esc)) catch return;
-    frame.appendSlice(gpa, statusLine(&line, state, elapsed_sec, duration_sec, mark_in, mark_out, color)) catch return;
+    const put = struct {
+        fn append(fr: *std.ArrayList(u8), al: std.mem.Allocator, s: []const u8) void {
+            fr.appendSlice(al, s) catch {};
+        }
+    }.append;
+
+    put(frame, gpa, live.sync_begin);
+    if (width != view.width or height != view.height) {
+        put(frame, gpa, live.clearScreen(&esc));
+        view.width = width;
+        view.height = height;
+    }
+    put(frame, gpa, live.moveTo(&esc, 1, 1));
+    put(frame, gpa, live.clearLine(&esc));
+    put(frame, gpa, statusLine(&line, f.state, f.elapsed_sec, f.duration_sec, f.mark_in, f.mark_out, f.color));
 
     var row: usize = 0;
-    while (row < waveform.view_height) : (row += 1) {
-        frame.appendSlice(gpa, live.moveTo(&esc, 2 + row, 1)) catch return;
-        frame.appendSlice(gpa, live.clearLine(&esc)) catch return;
-        frame.appendSlice(gpa, waveform.renderRow(fr, waveform.view_height, row, .{
+    while (row < height) : (row += 1) {
+        put(frame, gpa, live.moveTo(&esc, 2 + row, 1));
+        put(frame, gpa, live.clearLine(&esc));
+        put(frame, gpa, waveform.renderRow(cols, height, row, .{
             .played_cols = cursor,
             .cursor_col = cursor,
             .sel = sel,
             .sel_edges = edges,
-            .color = color,
-        }, &line)) catch return;
+            .color = f.color,
+        }, &line));
     }
+
+    // The ruler spans the whole recording under the grid.
+    const axis = ruler.Axis{
+        .origin_ms = 0,
+        .ms_per_col = @max(f.duration_sec, 0.001) * 1000.0 / @as(f64, @floatFromInt(@max(width, 1))),
+    };
+    put(frame, gpa, live.moveTo(&esc, 2 + height, 1));
+    put(frame, gpa, live.clearLine(&esc));
+    if (f.color) put(frame, gpa, style.dim);
+    put(frame, gpa, ruler.renderTicks(&line, width, axis));
+    put(frame, gpa, live.moveTo(&esc, 3 + height, 1));
+    put(frame, gpa, live.clearLine(&esc));
+    put(frame, gpa, ruler.renderLabels(&line, width, axis));
+    if (f.color) put(frame, gpa, style.reset);
 
     // The notes row: the pending-delete prompt or a transient notice.
-    frame.appendSlice(gpa, live.moveTo(&esc, 2 + waveform.view_height, 1)) catch return;
-    frame.appendSlice(gpa, live.clearLine(&esc)) catch return;
-    if (note) |msg| {
+    put(frame, gpa, live.moveTo(&esc, 4 + height, 1));
+    put(frame, gpa, live.clearLine(&esc));
+    if (f.note) |msg| {
         var styled: [192]u8 = undefined;
         var n: usize = 0;
-        style.appendStyled(&styled, &n, color, style.yellow, msg);
-        frame.appendSlice(gpa, styled[0..n]) catch return;
+        style.appendStyled(&styled, &n, f.color, style.yellow, msg);
+        put(frame, gpa, styled[0..n]);
     }
 
-    // The key legend, one dim row under the grid.
-    frame.appendSlice(gpa, live.moveTo(&esc, 3 + waveform.view_height, 1)) catch return;
-    frame.appendSlice(gpa, live.clearLine(&esc)) catch return;
-    frame.appendSlice(gpa, hintsLine(&line, has_marks, state == .paused, color)) catch return;
+    // The key legend, one dim row under everything.
+    put(frame, gpa, live.moveTo(&esc, 5 + height, 1));
+    put(frame, gpa, live.clearLine(&esc));
+    put(frame, gpa, hintsLine(&line, has_marks, f.state == .paused, f.color));
 
-    frame.appendSlice(gpa, live.sync_end) catch return;
+    put(frame, gpa, live.sync_end);
     printStderr(io, frame.items);
 }
 

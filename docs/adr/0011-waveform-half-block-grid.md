@@ -2,8 +2,9 @@
 type: ADR
 id: "0011"
 title: "Render waveforms as a multi-row half-block grid"
-status: active
+status: superseded
 date: 2026-09-04
+superseded_by: "0015"
 ---
 
 ## Context

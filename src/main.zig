@@ -268,6 +268,7 @@ test {
     _ = @import("playback.zig");
     _ = @import("player.zig");
     _ = @import("prompts.zig");
+    _ = @import("ruler.zig");
     _ = @import("setupcmd.zig");
     _ = @import("style.zig");
     _ = @import("transcribecmd.zig");
