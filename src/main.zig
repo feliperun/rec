@@ -6,27 +6,28 @@ const playback = @import("playback.zig");
 const record = @import("record.zig");
 const setupcmd = @import("setupcmd.zig");
 const transcribecmd = @import("transcribecmd.zig");
-const tui = @import("tui.zig");
 const updater = @import("update.zig");
 
 const usage =
     \\Usage: rec [command]
     \\
     \\Commands:
-    \\  record [--duration <sec>]  Record audio to ~/recordings/
+    \\  record [--duration <sec>]  Record audio to ~/recordings/ (the default:
+    \\                             `rec` alone records, `rec --duration 5` too)
     \\  list                       List recordings in ~/recordings/
-    \\  play <index|filename>      Play a recording
-    \\  transcribe <index|filename> [--language lg] [--out path]
+    \\  play [index|filename]      Play a recording (default: the latest)
+    \\  transcribe [index|filename] [--language lg] [--out path]
     \\                             [--no-refine] [--context text]
-    \\                             Transcribe via Deepgram and refine with the configured LLM
-    \\  format <index|path> [--template name] [--out path] [--context text]
-    \\                             Restructure a transcript with a prompt template (default: meeting)
+    \\                             Transcribe via Deepgram and refine with the
+    \\                             configured LLM (default: the latest recording)
+    \\  format [index|path] [--template name] [--out path] [--context text]
+    \\                             Restructure a transcript with a prompt template
+    \\                             (default: meeting, on the latest recording)
     \\  setup                      Choose which coding-agent LLM processes transcripts
     \\                             (alias: configure-llm)
     \\  about                      Show the project page and how to contribute
     \\  update                     Update rec from GitHub Releases (auto-checked daily)
-    \\
-    \\With no command, enters interactive mode.
+    \\  help                       Show this message
     \\
 ;
 
@@ -76,12 +77,14 @@ pub fn main(init: std.process.Init) u8 {
         return 1;
     };
 
-    if (args.items.len < 2) {
-        return tui.runInteractive(io, init.gpa, recordings_path);
-    }
+    const command = splitCommand(args.items[1..]);
+    const cmd = command.verb;
+    const rest = command.rest;
 
-    const cmd = args.items[1];
-    const rest = args.items[2..];
+    if (std.mem.eql(u8, cmd, "help")) {
+        printStdout(io, usage);
+        return 0;
+    }
 
     // Silent self-update check: once a day, never during a recording or when
     // `update` itself is running, and mute on every failure path.
@@ -113,11 +116,14 @@ pub fn main(init: std.process.Init) u8 {
     }
 
     if (std.mem.eql(u8, cmd, "play")) {
-        if (rest.len != 1) {
+        if (rest.len > 1) {
             printStderr(io, usage);
             return 1;
         }
-        return playback.playSelection(io, init.gpa, rest[0], recordings_path);
+        // No selection plays the latest recording: index 1 of the
+        // newest-first library order.
+        const selection: []const u8 = if (rest.len == 1) rest[0] else library.latest_selection;
+        return playback.playSelection(io, init.gpa, selection, recordings_path);
     }
 
     if (std.mem.eql(u8, cmd, "transcribe")) {
@@ -167,6 +173,24 @@ pub fn main(init: std.process.Init) u8 {
     return 1;
 }
 
+const Command = struct {
+    verb: []const u8,
+    rest: []const [:0]const u8,
+};
+
+/// The verb and its arguments from argv[1..]. Recording is the implied
+/// verb: bare `rec` records, and so does `rec --duration 5` — a leading
+/// flag belongs to record. `-h`/`--help` ask for the usage.
+fn splitCommand(args: []const [:0]const u8) Command {
+    if (args.len == 0) return .{ .verb = "record", .rest = args };
+    const first = args[0];
+    if (std.mem.eql(u8, first, "-h") or std.mem.eql(u8, first, "--help")) {
+        return .{ .verb = "help", .rest = args[1..] };
+    }
+    if (std.mem.startsWith(u8, first, "-")) return .{ .verb = "record", .rest = args };
+    return .{ .verb = first, .rest = args[1..] };
+}
+
 const RecordArgs = union(enum) {
     invalid,
     default,
@@ -195,6 +219,44 @@ fn printStdout(io: std.Io, msg: []const u8) void {
     std.Io.File.writeStreamingAll(.stdout(), io, msg) catch {};
 }
 
+test "bare rec and a leading flag imply the record verb" {
+    const none = splitCommand(&.{});
+    try std.testing.expectEqualStrings("record", none.verb);
+    try std.testing.expectEqual(@as(usize, 0), none.rest.len);
+
+    const timed = splitCommand(&.{ "--duration", "5" });
+    try std.testing.expectEqualStrings("record", timed.verb);
+    try std.testing.expectEqual(@as(usize, 2), timed.rest.len);
+    try std.testing.expectEqualStrings("--duration", timed.rest[0]);
+
+    // The explicit verb still works and keeps its own arguments.
+    const explicit = splitCommand(&.{ "record", "--duration", "5" });
+    try std.testing.expectEqualStrings("record", explicit.verb);
+    try std.testing.expectEqual(@as(usize, 2), explicit.rest.len);
+}
+
+test "a verb takes the remaining arguments; help has two spellings" {
+    const bare_play = splitCommand(&.{"play"});
+    try std.testing.expectEqualStrings("play", bare_play.verb);
+    try std.testing.expectEqual(@as(usize, 0), bare_play.rest.len);
+
+    const play_two = splitCommand(&.{ "play", "2" });
+    try std.testing.expectEqualStrings("play", play_two.verb);
+    try std.testing.expectEqualStrings("2", play_two.rest[0]);
+
+    try std.testing.expectEqualStrings("help", splitCommand(&.{"--help"}).verb);
+    try std.testing.expectEqualStrings("help", splitCommand(&.{"-h"}).verb);
+    try std.testing.expectEqualStrings("help", splitCommand(&.{"help"}).verb);
+}
+
+test "parseRecordArgs accepts a duration and rejects the rest" {
+    try std.testing.expectEqual(RecordArgs.default, parseRecordArgs(&.{}));
+    try std.testing.expectEqual(RecordArgs{ .duration = 2.5 }, parseRecordArgs(&.{ "--duration", "2.5" }));
+    try std.testing.expectEqual(RecordArgs.invalid, parseRecordArgs(&.{"--duration"}));
+    try std.testing.expectEqual(RecordArgs.invalid, parseRecordArgs(&.{ "--duration", "-1" }));
+    try std.testing.expectEqual(RecordArgs.invalid, parseRecordArgs(&.{"--verbose"}));
+}
+
 test {
     if (@import("builtin").os.tag == .macos) _ = @import("m4a.zig");
     _ = @import("capture.zig");
@@ -208,7 +270,6 @@ test {
     _ = @import("prompts.zig");
     _ = @import("setupcmd.zig");
     _ = @import("style.zig");
-    _ = @import("tui.zig");
     _ = @import("transcribecmd.zig");
     _ = @import("update.zig");
     _ = @import("okf.zig");

@@ -23,8 +23,9 @@ pub const ParsedFormatArgs = union(enum) {
     invalid,
 };
 
-/// Same discipline as the transcribe parser in main.zig: one positional, flags
-/// consume a following token, last occurrence wins, everything else invalid.
+/// Same discipline as the transcribe parser: one positional (the latest
+/// recording when absent), flags consume a following token, last occurrence
+/// wins, everything else invalid.
 pub fn parseArgs(args: []const [:0]const u8) ParsedFormatArgs {
     var parsed = FormatArgs{ .selection = "" };
     var seen_selection = false;
@@ -49,14 +50,15 @@ pub fn parseArgs(args: []const [:0]const u8) ParsedFormatArgs {
             return .invalid;
         }
     }
-    if (!seen_selection or !llm.validTemplateName(parsed.template)) return .invalid;
+    if (!seen_selection) parsed.selection = library.latest_selection;
+    if (!llm.validTemplateName(parsed.template)) return .invalid;
     return .{ .ok = parsed };
 }
 
 // --- command body ------------------------------------------------------------
 
 pub const usage =
-    \\rec format <index|filename|path> [--template meeting] [--out path] [--context text]
+    \\rec format [index|filename|path] [--template meeting] [--out path] [--context text]
 ;
 
 /// `rec format` body. The selection resolves either as an explicit markdown
@@ -336,12 +338,19 @@ test "parse format args: defaults and flags" {
     try std.testing.expectEqualStrings("retro", full.template);
     try std.testing.expectEqualStrings("y.md", full.out.?);
     try std.testing.expectEqualStrings("projeto z", full.context.?);
+
+    // No selection: the latest recording's transcript.
+    const latest = switch (parseArgs(&.{ "--template", "retro" })) {
+        .ok => |a| a,
+        .invalid => return error.TestUnexpectedResult,
+    };
+    try std.testing.expectEqualStrings(library.latest_selection, latest.selection);
+    try std.testing.expectEqualStrings("retro", latest.template);
 }
 
 test "parse format args rejects bad usage" {
     const cases = [_][]const [:0]const u8{
         &.{"--template"}, // missing value
-        &.{}, // no selection
         &.{ "-t", "x" }, // unknown flag
         &.{ "a", "b" }, // two positionals
         &.{ "--template", "../evil", "f" }, // traversal attempt via template name

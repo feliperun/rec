@@ -28,7 +28,7 @@ them back — without leaving the terminal and without hand-rolled device code.
   directory prints a friendly empty state, not a crash.
 
 ### FR3 — Play
-- `rec play <index|filename>` plays a recording through the default output
+- `rec play [index|filename]` plays a recording through the default output
   device in-process: the recording is decoded to canonical PCM once and the
   same samples feed the waveform and the speaker (miniaudio playback).
 - On a terminal playback is interactive: a multi-row waveform opens at the
@@ -42,13 +42,15 @@ them back — without leaving the terminal and without hand-rolled device code.
 - Off a terminal, playback runs to completion and is interruptible with
   `Ctrl-C`.
 
-### FR4 — Interactive mode
-- Running `rec` with no subcommand enters a minimal interactive menu:
-  `r` start recording · `l` list · `<number>` + Enter plays · `q` quit.
+### FR4 — Implied verb and implied selection
+- Running `rec` with no subcommand records; a leading flag (`rec --duration
+  5`) belongs to record. `rec help`/`--help`/`-h` print the usage.
+- `play`, `transcribe`, and `format` act on the latest recording when no
+  selection is given (index 1 of the newest-first order `list` shows).
 - Raw terminal mode is restored on exit even after Ctrl-C (no broken terminal).
 
 ### FR5 — Transcribe
-- `rec transcribe <index|filename>` resolves the selection exactly like
+- `rec transcribe [index|filename]` resolves the selection exactly like
   `play` and sends the recording to the Deepgram pre-recorded API through
   `/usr/bin/curl` as a child process — M4A as `audio/mp4`, legacy WAV as
   `audio/wav`.
@@ -86,7 +88,7 @@ them back — without leaving the terminal and without hand-rolled device code.
   context.
 
 ### FR8 — Format via user templates (`format`)
-- `rec format <index|filename|path>` transforms a transcript markdown using
+- `rec format [index|filename|path]` transforms a transcript markdown using
   a named prompt template: user-editable files under `<config dir>/templates/`,
   created on first use from copies embedded in the binary (`meeting` is the
   structuring template behind the default; `refine` backs FR7). Embedded

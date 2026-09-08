@@ -26,8 +26,9 @@ microphone ──miniaudio──▶ PCM frames in memory ──library.recording
      transcribecmd.zig ──▶ transcribe.zig ──/usr/bin/curl──▶ Deepgram ──▶ okf.zig ──▶ *.md
 ```
 
-`main.zig` parses the subcommand and dispatches; `tui.zig` wraps the same
-verbs in a raw-mode interactive menu.
+`main.zig` parses the verb and dispatches. Recording is the implied verb
+(bare `rec` records) and the latest recording is the implied selection for
+`play`, `transcribe`, and `format` (`library.latest_selection`).
 
 ## Components
 
@@ -48,7 +49,6 @@ verbs in a raw-mode interactive menu.
 | `src/transcribe.zig` | Spawns `/usr/bin/curl` against Deepgram pre-recorded API |
 | `src/transcribecmd.zig` | The transcribe verb: resolve the selection, send the recording to Deepgram, render the OKF markdown, and run the LLM refine pass (shared by the CLI and the play view's `T`) |
 | `src/okf.zig` | Renders the OKF markdown transcript (frontmatter + prose) |
-| `src/tui.zig` | Raw-mode interactive menu; restores terminal on every exit path |
 | `src/miniaudio.c` + `vendor/miniaudio.h` | Vendored single-file audio I/O |
 
 ## Runtime & hosting
