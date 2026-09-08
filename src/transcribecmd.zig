@@ -15,7 +15,11 @@ const usage =
 ;
 
 /// Deepgram language used unless --language says otherwise.
-const default_language = "pt-BR";
+const default_language = "auto";
+
+const no_speech_message =
+    "transcribe: no speech was recognized in the recording\n" ++
+    "Check that speech is clear during playback and that --language matches the spoken language.\n";
 
 const TranscribeSelection = struct {
     selection: []const u8,
@@ -175,7 +179,7 @@ pub fn run(
                 printStderr(io, ")\n");
             },
             error.BadResponse => printStderr(io, "transcribe: unexpected response from deepgram\n"),
-            error.NoSpeech => printStderr(io, "transcribe: no speech found in recording\n"),
+            error.NoSpeech => printStderr(io, no_speech_message),
             error.OutOfMemory => printStderr(io, "transcribe: out of memory\n"),
         }
         return 1;
@@ -184,12 +188,18 @@ pub fn run(
     const utterances = transcribe.parseResponse(gpa, result.json.items) catch |err| {
         switch (err) {
             error.BadResponse => printStderr(io, "transcribe: unexpected response from deepgram\n"),
-            error.NoSpeech => printStderr(io, "transcribe: no speech found in recording\n"),
+            error.NoSpeech => printStderr(io, no_speech_message),
             error.OutOfMemory => printStderr(io, "transcribe: out of memory\n"),
         }
         return 1;
     };
     defer transcribe.freeUtterances(gpa, utterances);
+
+    const language = transcribe.responseLanguage(gpa, result.json.items, ta.language) catch {
+        printStderr(io, "transcribe: cannot read the transcript language\n");
+        return 1;
+    };
+    defer gpa.free(language);
 
     // The duration shown by `list` is already parsed from the header; reuse
     // it for the transcript's duration_sec frontmatter field.
@@ -208,7 +218,7 @@ pub fn run(
         .resource = name,
         .timestamp = ts_buf[0..],
         .model = "nova-3",
-        .language = ta.language,
+        .language = language,
         .duration_sec = duration_sec,
     }, utterances) catch {
         printStderr(io, "transcribe: out of memory\n");
@@ -400,7 +410,7 @@ fn transcribeArgsInvalid(args: []const [:0]const u8) !void {
 test "transcribe args: bare selection gets the default language and output" {
     const a = try transcribeArgsOk(&.{"3"});
     try std.testing.expectEqualStrings("3", a.selection);
-    try std.testing.expectEqualStrings(default_language, a.language);
+    try std.testing.expectEqualStrings("auto", a.language);
     try std.testing.expect(a.out == null);
 }
 

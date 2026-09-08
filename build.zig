@@ -30,10 +30,17 @@ pub fn build(b: *std.Build) void {
     });
     exe_mod.addIncludePath(b.path("vendor"));
 
+    // Deterministic E2E recordings without opening a physical microphone.
+    if (b.option(bool, "silent-input", "Use miniaudio's null backend for E2E tests") orelse false) {
+        exe_mod.addCMacro("MA_ENABLE_ONLY_SPECIFIC_BACKENDS", "1");
+        exe_mod.addCMacro("MA_ENABLE_NULL", "1");
+    }
+
     // The single version source: build.zig.zon, embedded as `build_info`
     // so `rec about` shows it and auto-update compares it against releases.
     const build_info = b.addOptions();
     build_info.addOption([]const u8, "version", zon.version);
+    build_info.addOption([]const u8, "listen_base", b.option([]const u8, "test-listen-base", "Local transcription server URL for E2E tests") orelse "https://api.deepgram.com/v1/listen?");
     exe_mod.addOptions("build_info", build_info);
 
     // CoreAudio's frameworks exist (and are needed) only on macOS; the M4A

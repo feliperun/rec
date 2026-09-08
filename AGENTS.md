@@ -93,6 +93,20 @@ Record every failure that cost real debugging time, with the invariant that prev
 it and a link to the ADR or code that must not be undone. Highest-value part of this
 file — keep appending.
 
+- **Low RMS and zero Deepgram utterances do not prove silence.** A forced
+  language can suppress otherwise intelligible speech. Before blaming capture,
+  compare automatic language detection against the forced language on the same
+  unmodified file. `src/transcribe.zig` must send `detect_language=true` by default
+  and omit `language`; explicit `--language` overrides it. The regression lives
+  in `scripts/e2e_transcribe.py`. The −40 dBFS recorder warning (`LevelTracker`
+  in `src/record.zig`) is only a low-level advisory, not speech detection.
+- **A closed stdin makes `poll` report readable forever** — `keys.readKey` answered
+  `.eof` instantly, so every key loop paced on the poll window (record's tick loop)
+  spun at full speed with no pacing: 2.3 GB of stderr in 200 s. readKey burns the
+  pacing window out on EOF and broken-handle outcomes (`burnWindow` in
+  `src/keys.zig`); the "readKey's poll window is the tick pacing" invariant in
+  `src/record.zig` depends on that — `rec record < /dev/null` must stay bounded.
+
 - CoreFoundation's `Boolean` is `UInt8`, **not** C `bool` — declare externs like
   `CFURLCreateFromFileSystemRepresentation` with a `u8` parameter or the varargs
   ABI corrupts the call. See `src/m4a.zig` and [ADR 0004](docs/adr/0004-record-natively-in-m4a-aac.md).

@@ -20,6 +20,12 @@ jobs:
         with:
           version: "0.16.0"
       - run: zig build test
+      - name: Transcribe with a local synthetic server
+        run: python scripts/e2e_transcribe.py
+      - name: Build with synthetic silent input
+        run: zig build -Dsilent-input=true --prefix e2e-out
+      - name: Record silence and verify warning and closed-stdin pacing
+        run: python scripts/e2e_record_silence.py e2e-out/bin/rec${{ runner.os == 'Windows' && '.exe' || '' }}
 
   build:
     strategy:

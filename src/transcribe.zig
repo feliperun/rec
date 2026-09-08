@@ -5,27 +5,30 @@ const wav = @import("wav.zig");
 /// (System32 ships curl.exe and spawn resolves bare names from PATH).
 const curl_path = if (@import("builtin").os.tag == .windows) "curl" else "/usr/bin/curl";
 
-// Query parameters are fixed by the spec and their order is pinned by tests;
-// only `language` is spliced in, verbatim.
-const listen_base = "https://api.deepgram.com/v1/listen?";
-const listen_query_before_language = "model=nova-3&language=";
+const listen_base = @import("build_info").listen_base;
+const listen_query_before_language = "model=nova-3&";
 const listen_query_after_language = "&smart_format=true&punctuate=true&utterances=true&diarize_model=latest&mip_opt_out=true";
 
-/// Bytes `buildListenUrl` needs in its buffer for a language code of the
-/// given length.
-pub fn listenUrlLen(language_len: usize) usize {
-    return listen_base.len + listen_query_before_language.len + language_len + listen_query_after_language.len;
+/// Bytes `buildListenUrl` needs for an explicit language code or "auto".
+pub fn listenUrlLen(language: []const u8) usize {
+    const lang_len = if (std.mem.eql(u8, language, "auto")) "detect_language=true".len else "language=".len + language.len;
+    return listen_base.len + listen_query_before_language.len + lang_len + listen_query_after_language.len;
 }
 
 /// Writes the Deepgram listen URL for `language` into `buf` (size it with
 /// listenUrlLen) and returns the filled slice. Parameter order is part of the
 /// request contract, not cosmetic.
 pub fn buildListenUrl(buf: []u8, language: []const u8) []const u8 {
-    std.debug.assert(buf.len >= listenUrlLen(language.len));
+    std.debug.assert(buf.len >= listenUrlLen(language));
     var n: usize = 0;
     appendStr(buf, &n, listen_base);
     appendStr(buf, &n, listen_query_before_language);
-    appendStr(buf, &n, language);
+    if (std.mem.eql(u8, language, "auto")) {
+        appendStr(buf, &n, "detect_language=true");
+    } else {
+        appendStr(buf, &n, "language=");
+        appendStr(buf, &n, language);
+    }
     appendStr(buf, &n, listen_query_after_language);
     return buf[0..n];
 }
@@ -58,11 +61,28 @@ const ApiUtterance = struct {
 
 const ApiResults = struct {
     utterances: ?[]const ApiUtterance = null,
+    channels: ?[]const struct { detected_language: ?[]const u8 = null } = null,
 };
 
 const ApiResponse = struct {
     results: ?ApiResults = null,
 };
+
+/// Owned language code for the transcript metadata, never the selector "auto".
+pub fn responseLanguage(gpa: std.mem.Allocator, json_bytes: []const u8, requested: []const u8) ParseError![]u8 {
+    if (!std.mem.eql(u8, requested, "auto")) return gpa.dupe(u8, requested);
+    const parsed = std.json.parseFromSlice(ApiResponse, gpa, json_bytes, .{ .ignore_unknown_fields = true }) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return error.BadResponse,
+    };
+    defer parsed.deinit();
+    const results = parsed.value.results orelse return error.BadResponse;
+    const channels = results.channels orelse return error.BadResponse;
+    if (channels.len != 1) return error.BadResponse;
+    const language = channels[0].detected_language orelse return error.BadResponse;
+    if (language.len == 0) return error.BadResponse;
+    return gpa.dupe(u8, language);
+}
 
 /// Parses a listen response into owned utterances (free with
 /// freeUtterances). Silence and breakage stay distinct: an empty or missing
@@ -125,7 +145,7 @@ pub fn contentTypeFor(name: []const u8) []const u8 {
 /// travels only inside the child's Authorization header; resolving it is the
 /// caller's job.
 pub fn transcribe(io: std.Io, gpa: std.mem.Allocator, wav_abs_path: []const u8, api_key: []const u8, language: []const u8, out: *TranscribeOutput) TranscribeError!void {
-    const url_buf = gpa.alloc(u8, listenUrlLen(language.len)) catch return error.OutOfMemory;
+    const url_buf = gpa.alloc(u8, listenUrlLen(language)) catch return error.OutOfMemory;
     defer gpa.free(url_buf);
     const url = buildListenUrl(url_buf, language);
 
@@ -192,8 +212,8 @@ fn appendStr(buf: []u8, n: *usize, s: []const u8) void {
     }
 }
 
-test "listen url keeps the fixed parameter order with the default language" {
-    var buf: [listenUrlLen("pt-BR".len)]u8 = undefined;
+test "listen url keeps the fixed parameter order with explicit Portuguese" {
+    var buf: [listenUrlLen("pt-BR")]u8 = undefined;
     const url = buildListenUrl(&buf, "pt-BR");
     try std.testing.expectEqualStrings(
         "https://api.deepgram.com/v1/listen?model=nova-3&language=pt-BR&smart_format=true&punctuate=true&utterances=true&diarize_model=latest&mip_opt_out=true",
@@ -201,10 +221,32 @@ test "listen url keeps the fixed parameter order with the default language" {
     );
 }
 
+test "automatic language detection never sends a forced language" {
+    var buf: [listenUrlLen("auto")]u8 = undefined;
+    try std.testing.expectEqualStrings(
+        "https://api.deepgram.com/v1/listen?model=nova-3&detect_language=true&smart_format=true&punctuate=true&utterances=true&diarize_model=latest&mip_opt_out=true",
+        buildListenUrl(&buf, "auto"),
+    );
+}
+
+test "transcript language is the detected code or explicit selection" {
+    const gpa = std.testing.allocator;
+    const json = "{\"results\":{\"channels\":[{\"detected_language\":\"en\"}]}}";
+    const detected = try responseLanguage(gpa, json, "auto");
+    defer gpa.free(detected);
+    try std.testing.expectEqualStrings("en", detected);
+    const explicit = try responseLanguage(gpa, "{}", "pt-BR");
+    defer gpa.free(explicit);
+    try std.testing.expectEqualStrings("pt-BR", explicit);
+    try std.testing.expectError(error.BadResponse, responseLanguage(gpa, "{}", "auto"));
+    try std.testing.expectError(error.BadResponse, responseLanguage(gpa, "{\"results\":{\"channels\":[]}}", "auto"));
+    try std.testing.expectError(error.BadResponse, responseLanguage(gpa, "{\"results\":{\"channels\":[{}]}}", "auto"));
+}
+
 test "listen url splices custom languages verbatim without reordering" {
-    var buf: [listenUrlLen("en-US".len)]u8 = undefined;
+    var buf: [listenUrlLen("en-US")]u8 = undefined;
     const url = buildListenUrl(&buf, "en-US");
-    try std.testing.expectEqual(listenUrlLen("en-US".len), url.len);
+    try std.testing.expectEqual(listenUrlLen("en-US"), url.len);
     try std.testing.expectEqualStrings(
         "https://api.deepgram.com/v1/listen?model=nova-3&language=en-US&smart_format=true&punctuate=true&utterances=true&diarize_model=latest&mip_opt_out=true",
         url,

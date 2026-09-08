@@ -81,11 +81,16 @@ pub fn recordOnce(
 
     // The summary prints after the alt-screen leave below (defers run in
     // reverse registration order): success and failures land on the normal
-    // screen, never inside the live view.
+    // screen, never inside the live view. A capture that never got audible
+    // adds its warning right after the summary.
     var result: Outcome = .none;
+    var dead_capture = false;
     defer switch (result) {
         .none => {},
-        .saved => |s| printSaved(io, path, s.dur_csec, s.bytes, color),
+        .saved => |s| {
+            printSaved(io, path, s.dur_csec, s.bytes, color);
+            if (dead_capture) printStderr(io, dead_capture_warning);
+        },
         .failed => |msg| printStderr(io, msg),
     };
 
@@ -131,6 +136,10 @@ pub fn recordOnce(
     defer peak_view.deinit(gpa);
     var consumed: usize = 0;
 
+    // Watches what the encoder actually gets, so the audibility verdict
+    // covers exactly the content of the published file.
+    var levels = LevelTracker.init(rec.sample_rate, rec.channels);
+
     // The whole view is composed here and written in one shot per tick —
     // many small writes are what made the view flicker.
     var frame: std.ArrayList(u8) = .empty;
@@ -145,7 +154,7 @@ pub fn recordOnce(
     var encoded_len: usize = 0;
 
     loop: while (true) {
-        switch (keys.readKey(tick_ms)) {
+        switch (keys.readKey(io, tick_ms)) {
             .byte => |c| switch (c) {
                 ' ' => {
                     const now = std.Io.Timestamp.now(io, .awake);
@@ -182,6 +191,7 @@ pub fn recordOnce(
                 return 1;
             };
             tracker.feed(new_pcm.items);
+            levels.add(new_pcm.items);
             encoded_len += new_pcm.items.len;
         }
 
@@ -194,7 +204,13 @@ pub fn recordOnce(
     // The final callback block may have arrived after the last tick; it is
     // encoded only when it was not paused away.
     rec.takeNewPcm(&new_pcm, &consumed);
-    if (!paused) encoded_len += new_pcm.items.len;
+    if (!paused) {
+        levels.add(new_pcm.items);
+        encoded_len += new_pcm.items.len;
+    }
+    // Fold the trailing partial second in before judging audibility.
+    levels.finish();
+    dead_capture = levels.isDead();
     // Duration comes from the PCM actually encoded; the size from the
     // encoded file on disk.
     const dur_csec: u64 = @as(u64, encoded_len) * 100 / byte_rate;
@@ -207,6 +223,70 @@ pub fn recordOnce(
 /// How a recording run ended; printed on the normal screen after the live
 /// view is gone.
 const Outcome = union(enum) { none, saved: struct { dur_csec: u64, bytes: u64 }, failed: []const u8 };
+
+const dead_capture_warning =
+    "warning: recorded audio stayed very quiet (check the input device and its volume before recording again; transcription may miss speech)\n";
+
+/// A second of audio whose RMS stays under this level (s16 linear, -40 dBFS)
+/// triggers a low-level warning. Signal level alone cannot establish whether
+/// speech is present or intelligible; this is not a voice activity detector.
+const audibility_floor: f64 = 32768.0 * std.math.pow(f64, 10.0, -40.0 / 20.0);
+
+/// How long a recording must run before the dead-capture verdict is offered,
+/// so short quiet clips do not nag.
+const audibility_min_sec: usize = 10;
+
+/// Watches the recorded signal's level, one whole second of audio at a time.
+/// Fed the same PCM the encoder gets — paused audio never reaches it — so
+/// the verdict covers exactly what lands in the published file.
+const LevelTracker = struct {
+    rate: u32,
+    channels: u16,
+    /// Samples in one full second across all channels.
+    window_samples: usize,
+    open_samples: usize = 0,
+    open_sum_sq: u64 = 0,
+    /// RMS (s16 linear) of the loudest window so far, the trailing partial
+    /// folded in by finish() when it is at least half a second long.
+    loudest_rms: f64 = 0,
+    total_samples: usize = 0,
+
+    fn init(rate: u32, channels: u16) LevelTracker {
+        return .{ .rate = rate, .channels = channels, .window_samples = @as(usize, rate) * channels };
+    }
+
+    fn add(self: *LevelTracker, bytes: []const u8) void {
+        const samples = std.mem.bytesAsSlice(i16, bytes);
+        self.total_samples += samples.len;
+        for (samples) |s| {
+            const v: i32 = s;
+            self.open_sum_sq += @as(u64, @intCast(v * v));
+            self.open_samples += 1;
+            if (self.open_samples == self.window_samples) self.closeWindow();
+        }
+    }
+
+    /// Closes the trailing partial window when it holds at least half a
+    /// second: speech confined to the tail of the recording must keep the
+    /// capture audible, or it would false-positive as dead.
+    fn finish(self: *LevelTracker) void {
+        if (self.open_samples * 2 >= self.window_samples) self.closeWindow();
+    }
+
+    fn closeWindow(self: *LevelTracker) void {
+        const rms: f64 = @sqrt(@as(f64, @floatFromInt(self.open_sum_sq)) / @as(f64, @floatFromInt(self.open_samples)));
+        if (rms > self.loudest_rms) self.loudest_rms = rms;
+        self.open_samples = 0;
+        self.open_sum_sq = 0;
+    }
+
+    /// The capture never became audible: it ran at least audibility_min_sec
+    /// seconds and no second of it ever reached the audibility floor.
+    fn isDead(self: *const LevelTracker) bool {
+        const min_samples = audibility_min_sec * self.window_samples;
+        return self.total_samples >= min_samples and self.loudest_rms < audibility_floor;
+    }
+};
 
 /// Final flush and atomic publication of a finished recording: the last PCM
 /// block, the moov-flushing finish, the rename over the public name, and the
@@ -581,4 +661,82 @@ test "composeStatus colors the dot, timer, and hints without changing cells" {
         paused_line,
     );
     try std.testing.expectEqual(@as(usize, 31), cells);
+}
+
+// --- level tracker tests -----------------------------------------------------
+
+// One full second of stereo s16 samples: 48000 frames x 2 channels.
+const test_window_samples = 48000 * 2;
+/// A constant amplitude whose RMS (-44.3 dBFS) matches the real dead
+/// captures the warning exists for.
+const test_quiet_amp: i16 = 200;
+/// A clearly audible constant amplitude (-18.3 dBFS).
+const test_loud_amp: i16 = 4000;
+
+fn quietSeconds(sec: usize) ![]i16 {
+    const buf = try std.testing.allocator.alloc(i16, sec * test_window_samples);
+    @memset(buf, test_quiet_amp);
+    return buf;
+}
+
+fn quietSecondsWithLoudWindow(sec: usize, loud_at: usize, loud_amp: i16) ![]i16 {
+    const buf = try quietSeconds(sec);
+    @memset(buf[loud_at * test_window_samples .. (loud_at + 1) * test_window_samples], loud_amp);
+    return buf;
+}
+
+test "level tracker: a long all-quiet capture reads as dead" {
+    const buf = try quietSeconds(11);
+    defer std.testing.allocator.free(buf);
+
+    var levels = LevelTracker.init(48000, 2);
+    levels.add(std.mem.sliceAsBytes(buf));
+    levels.finish();
+    try std.testing.expect(levels.isDead());
+    // -44.3 dBFS: the floor must sit far below real speech and above the wash.
+    try std.testing.expect(levels.loudest_rms < audibility_floor);
+}
+
+test "level tracker: one audible second clears the dead verdict" {
+    const buf = try quietSecondsWithLoudWindow(11, 6, test_loud_amp);
+    defer std.testing.allocator.free(buf);
+
+    var levels = LevelTracker.init(48000, 2);
+    levels.add(std.mem.sliceAsBytes(buf));
+    levels.finish();
+    try std.testing.expect(!levels.isDead());
+}
+
+test "level tracker: short quiet recordings are not judged" {
+    const buf = try quietSeconds(9);
+    defer std.testing.allocator.free(buf);
+
+    var levels = LevelTracker.init(48000, 2);
+    levels.add(std.mem.sliceAsBytes(buf));
+    levels.finish();
+    try std.testing.expect(!levels.isDead());
+}
+
+test "level tracker: speech confined to the trailing partial second counts" {
+    var levels = LevelTracker.init(48000, 2);
+    const quiet = try quietSeconds(10);
+    defer std.testing.allocator.free(quiet);
+    levels.add(std.mem.sliceAsBytes(quiet));
+    // A 0.6 s tail at full speech level: the recording must not read dead.
+    const tail = try std.testing.allocator.alloc(i16, test_window_samples * 6 / 10);
+    defer std.testing.allocator.free(tail);
+    @memset(tail, test_loud_amp);
+    levels.add(std.mem.sliceAsBytes(tail));
+    levels.finish();
+    try std.testing.expect(!levels.isDead());
+}
+
+test "level tracker: a quiet trailing partial stays dead" {
+    var levels = LevelTracker.init(48000, 2);
+    const quiet = try quietSeconds(10);
+    defer std.testing.allocator.free(quiet);
+    levels.add(std.mem.sliceAsBytes(quiet));
+    levels.add(std.mem.sliceAsBytes(quiet[0 .. test_window_samples * 6 / 10]));
+    levels.finish();
+    try std.testing.expect(levels.isDead());
 }
