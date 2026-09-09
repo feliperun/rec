@@ -164,11 +164,12 @@ pub fn main(init: std.process.Init) u8 {
             api_key,
             home_dir,
             recordings_path,
+            .terminal,
         );
     }
 
     if (std.mem.eql(u8, cmd, "format")) {
-        return formatcmd.run(io, init.gpa, rest, home_dir, recordings_path);
+        return formatcmd.run(io, init.gpa, rest, home_dir, recordings_path, .terminal);
     }
 
     if (std.mem.eql(u8, cmd, "share")) {

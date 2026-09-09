@@ -1,7 +1,7 @@
 const std = @import("std");
 const library = @import("library.zig");
 const llm = @import("llm.zig");
-const markdown = @import("markdown.zig");
+const command_ui = @import("command_ui.zig");
 const prompts = @import("prompts.zig");
 
 /// Name picked when the user passes no --template: the bundled meeting
@@ -74,12 +74,13 @@ pub fn run(
     args: []const [:0]const u8,
     home_dir: []const u8,
     recordings_path: []const u8,
+    ui: command_ui.Mode,
 ) u8 {
     const fa = switch (parseArgs(args)) {
         .invalid => {
-            printErr(io, "uso: ");
-            printErr(io, usage);
-            printErr(io, "\n");
+            ui.print(io, "uso: ");
+            ui.print(io, usage);
+            ui.print(io, "\n");
             return 1;
         },
         .ok => |a| a,
@@ -87,7 +88,7 @@ pub fn run(
 
     var cfg_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const config_dir = llm.configDirPath(home_dir, llm.envValue("XDG_CONFIG_HOME"), &cfg_buf) orelse {
-        printErr(io, "format: não consegui determinar o diretório de configuração\n");
+        ui.print(io, "format: não consegui determinar o diretório de configuração\n");
         return 1;
     };
     var tpl_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
@@ -99,9 +100,9 @@ pub fn run(
     const runner = switch (llm.resolveRunner(io, gpa, config_dir)) {
         .ok => |r| r,
         .none => |reason| {
-            printErr(io, "format: ");
-            printErr(io, reason);
-            printErr(io, "\n");
+            ui.print(io, "format: ");
+            ui.print(io, reason);
+            ui.print(io, "\n");
             return 1;
         },
     };
@@ -116,16 +117,16 @@ pub fn run(
         fa.selection,
         recordings_path,
     ) orelse {
-        printErr(io, "format: nenhuma gravação corresponde a '");
-        printErr(io, fa.selection);
-        printErr(io, "' (veja `rec list`) ou o caminho informado não existe\n");
+        ui.print(io, "format: nenhuma gravação corresponde a '");
+        ui.print(io, fa.selection);
+        ui.print(io, "' (veja `rec list`) ou o caminho informado não existe\n");
         return 1;
     };
 
     const transcript_bytes = std.Io.Dir.cwd().readFileAlloc(io, source_path, gpa, .limited(max_transcript_bytes)) catch {
-        printErr(io, "format: não consegui ler ");
-        printErr(io, source_path);
-        printErr(io, "\n");
+        ui.print(io, "format: não consegui ler ");
+        ui.print(io, source_path);
+        ui.print(io, "\n");
         return 1;
     };
     defer gpa.free(transcript_bytes);
@@ -136,11 +137,11 @@ pub fn run(
     const template_content: []u8 = tpl: {
         if (llm.loadTemplate(io, gpa, templates_dir, fa.template)) |t| break :tpl t else |err| switch (err) {
             error.InvalidName => {
-                printErr(io, "format: nome de template inválido (use minúsculas, dígitos, - ou _)\n");
+                ui.print(io, "format: nome de template inválido (use minúsculas, dígitos, - ou _)\n");
                 return 1;
             },
             error.OutOfMemory => {
-                printErr(io, "format: sem memória\n");
+                ui.print(io, "format: sem memória\n");
                 return 1;
             },
             // NotFound and FileSystem fall through to the embedded copies.
@@ -148,28 +149,28 @@ pub fn run(
         }
 
         const embedded = prompts.embeddedTemplate(fa.template) orelse {
-            printErr(io, "format: template '");
-            printErr(io, fa.template);
-            printErr(io, "' não encontrado em ");
-            printErr(io, templates_dir);
-            printErr(io, "\n");
-            listAvailable(io, gpa, templates_dir);
+            ui.print(io, "format: template '");
+            ui.print(io, fa.template);
+            ui.print(io, "' não encontrado em ");
+            ui.print(io, templates_dir);
+            ui.print(io, "\n");
+            listAvailable(io, gpa, templates_dir, ui);
             return 1;
         };
         const copy = gpa.dupe(u8, embedded) catch {
-            printErr(io, "format: sem memória\n");
+            ui.print(io, "format: sem memória\n");
             return 1;
         };
-        printErr(io, "format: usando a cópia embutida do template '");
-        printErr(io, fa.template);
-        printErr(io, "'\n");
+        ui.print(io, "format: usando a cópia embutida do template '");
+        ui.print(io, fa.template);
+        ui.print(io, "'\n");
         break :tpl copy;
     };
     defer gpa.free(template_content);
 
     const split = prompts.splitFrontmatter(transcript_bytes);
     const composed = prompts.compose(gpa, template_content, fa.context, split.body) catch {
-        printErr(io, "format: sem memória ao montar o prompt\n");
+        ui.print(io, "format: sem memória ao montar o prompt\n");
         return 1;
     };
     defer gpa.free(composed);
@@ -177,9 +178,9 @@ pub fn run(
     var note: [llm.max_note_bytes]u8 = undefined;
     var note_len: usize = 0;
     var describe_buf: [128]u8 = undefined;
-    printErr(io, "format: processando com ");
-    printErr(io, runner.describe(&describe_buf));
-    printErr(io, "...\n");
+    ui.print(io, "format: processando com ");
+    ui.print(io, runner.describe(&describe_buf));
+    ui.print(io, "...\n");
 
     var invocation = llm.run(
         io,
@@ -193,13 +194,13 @@ pub fn run(
         &note,
         &note_len,
     ) catch |err| {
-        printErr(io, "format: o modelo falhou (");
-        printErr(io, llm.failurePhrase(err));
+        ui.print(io, "format: o modelo falhou (");
+        ui.print(io, llm.failurePhrase(err));
         if (note_len > 0) {
-            printErr(io, ": ");
-            printErr(io, note[0..note_len]);
+            ui.print(io, ": ");
+            ui.print(io, note[0..note_len]);
         }
-        printErr(io, ")\n");
+        ui.print(io, ")\n");
         return 1;
     };
     defer invocation.deinit();
@@ -212,7 +213,7 @@ pub fn run(
             // Overwriting the input with the transformed text is never what
             // "save to this path" means.
             if (std.mem.eql(u8, p, source_path)) {
-                printErr(io, "format: --out não pode ser o próprio arquivo de entrada\n");
+                ui.print(io, "format: --out não pode ser o próprio arquivo de entrada\n");
                 return 1;
             }
             break :blk p;
@@ -226,26 +227,31 @@ pub fn run(
             "{s}.{s}.md",
             .{ source_path[0..stem_len], fa.template },
         ) catch {
-            printErr(io, "format: caminho de saída longo demais\n");
+            ui.print(io, "format: caminho de saída longo demais\n");
             return 1;
         };
         break :blk joined;
     };
 
-    std.Io.Dir.cwd().writeFile(io, .{
-        .sub_path = out_path,
-        .data = invocation.text(),
-    }) catch {
-        printErr(io, "format: não consegui gravar ");
-        printErr(io, out_path);
-        printErr(io, "\n");
-        return 1;
-    };
+    io.checkCancel() catch return 1;
+    {
+        const protection = io.swapCancelProtection(.blocked);
+        defer _ = io.swapCancelProtection(protection);
+        std.Io.Dir.cwd().writeFile(io, .{
+            .sub_path = out_path,
+            .data = invocation.text(),
+        }) catch {
+            ui.print(io, "format: não consegui gravar ");
+            ui.print(io, out_path);
+            ui.print(io, "\n");
+            return 1;
+        };
+    }
 
-    printErr(io, "Documento salvo em ");
-    printErr(io, out_path);
-    printErr(io, "\n");
-    _ = markdown.showFile(io, gpa, out_path);
+    ui.print(io, "Documento salvo em ");
+    ui.print(io, out_path);
+    ui.print(io, "\n");
+    ui.open(io, gpa, out_path);
     return 0;
 }
 
@@ -297,16 +303,16 @@ fn stripExt(name: []const u8) []const u8 {
     return name;
 }
 
-fn listAvailable(io: std.Io, gpa: std.mem.Allocator, templates_dir: []const u8) void {
+fn listAvailable(io: std.Io, gpa: std.mem.Allocator, templates_dir: []const u8, ui: command_ui.Mode) void {
     var names = llm.listTemplates(io, gpa, templates_dir) catch return;
     defer llm.freeTemplateNames(gpa, &names);
     if (names.items.len == 0) return;
-    printErr(io, "Templates disponíveis:");
+    ui.print(io, "Templates disponíveis:");
     for (names.items) |nm| {
-        printErr(io, " ");
-        printErr(io, nm);
+        ui.print(io, " ");
+        ui.print(io, nm);
     }
-    printErr(io, "\n");
+    ui.print(io, "\n");
 }
 
 fn appendStr(buf: []u8, n: *usize, s: []const u8) void {
@@ -314,10 +320,6 @@ fn appendStr(buf: []u8, n: *usize, s: []const u8) void {
         buf[n.*] = ch;
         n.* += 1;
     }
-}
-
-fn printErr(io: std.Io, msg: []const u8) void {
-    std.Io.File.writeStreamingAll(.stderr(), io, msg) catch {};
 }
 
 // --- tests -------------------------------------------------------------------

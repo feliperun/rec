@@ -1,7 +1,7 @@
 const std = @import("std");
 const library = @import("library.zig");
 const llm = @import("llm.zig");
-const markdown = @import("markdown.zig");
+const command_ui = @import("command_ui.zig");
 const okf = @import("okf.zig");
 const prompts = @import("prompts.zig");
 const record = @import("record.zig");
@@ -85,10 +85,11 @@ pub fn run(
     api_key: ?[]const u8,
     home_dir: []const u8,
     recordings_path: []const u8,
+    ui: command_ui.Mode,
 ) u8 {
     const ta = switch (parseTranscribeArgs(args)) {
         .invalid => {
-            printStderr(io, usage);
+            ui.print(io, usage);
             return 1;
         },
         .ok => |a| a,
@@ -98,11 +99,11 @@ pub fn run(
     defer library.freeEntries(gpa, &entries);
 
     library.scan(io, gpa, &entries, recordings_path) catch {
-        printStderr(io, "transcribe: out of memory\n");
+        ui.print(io, "transcribe: out of memory\n");
         return 1;
     };
     if (entries.items.len == 0) {
-        printStderr(io, "No recordings yet.\n");
+        ui.print(io, "No recordings yet.\n");
         return 1;
     }
 
@@ -111,9 +112,9 @@ pub fn run(
     library.sortNewestFirst(entries.items);
 
     const name = library.resolveName(ta.selection, entries.items) orelse {
-        printStderr(io, "transcribe: no recording matches '");
-        printStderr(io, ta.selection);
-        printStderr(io, "' (see `rec list`)\n");
+        ui.print(io, "transcribe: no recording matches '");
+        ui.print(io, ta.selection);
+        ui.print(io, "' (see `rec list`)\n");
         return 1;
     };
 
@@ -133,25 +134,25 @@ pub fn run(
         }
     }
     if (key.len == 0) {
-        printStderr(io, "transcribe: no Deepgram API key configured\n");
-        printStderr(io, "export DEEPGRAM_API_KEY or run `rec setup`\n");
+        ui.print(io, "transcribe: no Deepgram API key configured\n");
+        ui.print(io, "export DEEPGRAM_API_KEY or run `rec setup`\n");
         return 1;
     }
 
     // curl gets an absolute path so it never depends on our cwd.
     var rel_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const recording_path = library.recordingPath(recordings_path, name, &rel_buf) orelse {
-        printStderr(io, "transcribe: cannot resolve recordings/");
-        printStderr(io, name);
-        printStderr(io, "\n");
+        ui.print(io, "transcribe: cannot resolve recordings/");
+        ui.print(io, name);
+        ui.print(io, "\n");
         return 1;
     };
 
     var abs_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const abs_len = std.Io.Dir.cwd().realPathFile(io, recording_path, &abs_buf) catch {
-        printStderr(io, "transcribe: cannot resolve recordings/");
-        printStderr(io, name);
-        printStderr(io, "\n");
+        ui.print(io, "transcribe: cannot resolve recordings/");
+        ui.print(io, name);
+        ui.print(io, "\n");
         return 1;
     };
 
@@ -162,7 +163,7 @@ pub fn run(
         record.appendStr(&out_path_buf, &out_len, p);
     } else {
         const base = library.recordingPath(recordings_path, library.stripExt(name), &out_path_buf) orelse {
-            printStderr(io, "transcribe: cannot write output path\n");
+            ui.print(io, "transcribe: cannot write output path\n");
             return 1;
         };
         out_len = base.len;
@@ -174,31 +175,31 @@ pub fn run(
     defer result.json.deinit(gpa);
     transcribe.transcribe(io, gpa, abs_buf[0..abs_len], key, ta.language, &result) catch |err| {
         switch (err) {
-            error.CurlSpawnFailed => printStderr(io, "transcribe: cannot run curl\n"),
+            error.CurlSpawnFailed => ui.print(io, "transcribe: cannot run curl\n"),
             error.RequestFailed => {
-                printStderr(io, "transcribe: deepgram request failed (");
-                printStderr(io, flattenTail(&result.err_tail, result.err_tail_len));
-                printStderr(io, ")\n");
+                ui.print(io, "transcribe: deepgram request failed (");
+                ui.print(io, flattenTail(&result.err_tail, result.err_tail_len));
+                ui.print(io, ")\n");
             },
-            error.BadResponse => printStderr(io, "transcribe: unexpected response from deepgram\n"),
-            error.NoSpeech => printStderr(io, no_speech_message),
-            error.OutOfMemory => printStderr(io, "transcribe: out of memory\n"),
+            error.BadResponse => ui.print(io, "transcribe: unexpected response from deepgram\n"),
+            error.NoSpeech => ui.print(io, no_speech_message),
+            error.OutOfMemory => ui.print(io, "transcribe: out of memory\n"),
         }
         return 1;
     };
 
     const utterances = transcribe.parseResponse(gpa, result.json.items) catch |err| {
         switch (err) {
-            error.BadResponse => printStderr(io, "transcribe: unexpected response from deepgram\n"),
-            error.NoSpeech => printStderr(io, no_speech_message),
-            error.OutOfMemory => printStderr(io, "transcribe: out of memory\n"),
+            error.BadResponse => ui.print(io, "transcribe: unexpected response from deepgram\n"),
+            error.NoSpeech => ui.print(io, no_speech_message),
+            error.OutOfMemory => ui.print(io, "transcribe: out of memory\n"),
         }
         return 1;
     };
     defer transcribe.freeUtterances(gpa, utterances);
 
     const language = transcribe.responseLanguage(gpa, result.json.items, ta.language) catch {
-        printStderr(io, "transcribe: cannot read the transcript language\n");
+        ui.print(io, "transcribe: cannot read the transcript language\n");
         return 1;
     };
     defer gpa.free(language);
@@ -223,35 +224,41 @@ pub fn run(
         .language = language,
         .duration_sec = duration_sec,
     }, utterances) catch {
-        printStderr(io, "transcribe: out of memory\n");
+        ui.print(io, "transcribe: out of memory\n");
         return 1;
     };
     defer gpa.free(doc);
 
-    const file = std.Io.Dir.cwd().createFile(io, out_path, .{}) catch {
-        printStderr(io, "transcribe: cannot write ");
-        printStderr(io, out_path);
-        printStderr(io, "\n");
-        return 1;
-    };
-    defer file.close(io);
-    file.writeStreamingAll(io, doc) catch {
-        printStderr(io, "transcribe: cannot write ");
-        printStderr(io, out_path);
-        printStderr(io, "\n");
-        return 1;
-    };
+    // Once truncation starts, cancellation must not leave a partial document.
+    io.checkCancel() catch return 1;
+    {
+        const protection = io.swapCancelProtection(.blocked);
+        defer _ = io.swapCancelProtection(protection);
+        const file = std.Io.Dir.cwd().createFile(io, out_path, .{}) catch {
+            ui.print(io, "transcribe: cannot write ");
+            ui.print(io, out_path);
+            ui.print(io, "\n");
+            return 1;
+        };
+        defer file.close(io);
+        file.writeStreamingAll(io, doc) catch {
+            ui.print(io, "transcribe: cannot write ");
+            ui.print(io, out_path);
+            ui.print(io, "\n");
+            return 1;
+        };
+    }
 
-    printStderr(io, "Transcript saved to ");
-    printStderr(io, out_path);
-    printStderr(io, "\n");
+    ui.print(io, "Transcript saved to ");
+    ui.print(io, out_path);
+    ui.print(io, "\n");
 
     // Refinement never trades away the artifact: on any failure the raw
     // transcript stays exactly as saved and the command still exits 0.
-    if (!ta.no_refine) refineTranscript(io, gpa, home_dir, doc, ta.context, out_path);
+    if (!ta.no_refine) refineTranscript(io, gpa, home_dir, doc, ta.context, out_path, ui);
     // The saved artifact is immediately opened in the same Markdown viewer
     // used by playback and `format`; pipes receive a non-interactive render.
-    _ = markdown.showFile(io, gpa, out_path);
+    ui.open(io, gpa, out_path);
     return 0;
 }
 
@@ -267,19 +274,20 @@ fn refineTranscript(
     doc: []const u8,
     context: ?[]const u8,
     out_path: []const u8,
+    ui: command_ui.Mode,
 ) void {
     var cfg_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const config_dir = llm.configDirPath(home_dir, llm.envValue("XDG_CONFIG_HOME"), &cfg_buf) orelse {
-        printStderr(io, "refine: ignorado (sem diretório de configuração)\n");
+        ui.print(io, "refine: ignorado (sem diretório de configuração)\n");
         return;
     };
 
     const runner = switch (llm.resolveRunner(io, gpa, config_dir)) {
         .ok => |r| r,
         .none => |reason| {
-            printStderr(io, "refine: ignorado (");
-            printStderr(io, reason);
-            printStderr(io, ")\n");
+            ui.print(io, "refine: ignorado (");
+            ui.print(io, reason);
+            ui.print(io, ")\n");
             return;
         },
     };
@@ -293,7 +301,7 @@ fn refineTranscript(
     const template: []u8 = tpl: {
         if (llm.loadTemplate(io, gpa, templates_dir, "refine")) |t| break :tpl t else |_| {}
         break :tpl gpa.dupe(u8, prompts.refine_md) catch {
-            printStderr(io, "refine: ignorado (sem memória)\n");
+            ui.print(io, "refine: ignorado (sem memória)\n");
             return;
         };
     };
@@ -301,15 +309,15 @@ fn refineTranscript(
 
     const split = prompts.splitFrontmatter(doc);
     const prompt_doc = prompts.compose(gpa, template, context, split.body) catch {
-        printStderr(io, "refine: ignorado (sem memória)\n");
+        ui.print(io, "refine: ignorado (sem memória)\n");
         return;
     };
     defer gpa.free(prompt_doc);
 
     var describe_buf: [128]u8 = undefined;
-    printStderr(io, "Refinando com ");
-    printStderr(io, runner.describe(&describe_buf));
-    printStderr(io, "...\n");
+    ui.print(io, "Refinando com ");
+    ui.print(io, runner.describe(&describe_buf));
+    ui.print(io, "...\n");
 
     var note: [llm.max_note_bytes]u8 = undefined;
     var note_len: usize = 0;
@@ -325,13 +333,13 @@ fn refineTranscript(
         &note,
         &note_len,
     ) catch |err| {
-        printStderr(io, "refine: falhou (");
-        printStderr(io, llm.failurePhrase(err));
+        ui.print(io, "refine: falhou (");
+        ui.print(io, llm.failurePhrase(err));
         if (note_len > 0) {
-            printStderr(io, ": ");
-            printStderr(io, note[0..note_len]);
+            ui.print(io, ": ");
+            ui.print(io, note[0..note_len]);
         }
-        printStderr(io, "); transcrição original mantida\n");
+        ui.print(io, "); transcrição original mantida\n");
         return;
     };
     defer invocation.deinit();
@@ -342,23 +350,26 @@ fn refineTranscript(
     refined.appendSlice(gpa, invocation.text()) catch return;
     refined.append(gpa, '\n') catch return;
 
+    io.checkCancel() catch return;
+    const protection = io.swapCancelProtection(.blocked);
+    defer _ = io.swapCancelProtection(protection);
     const file = std.Io.Dir.cwd().createFile(io, out_path, .{}) catch {
-        printStderr(io, "refine: não consegui regravar ");
-        printStderr(io, out_path);
-        printStderr(io, "\n");
+        ui.print(io, "refine: não consegui regravar ");
+        ui.print(io, out_path);
+        ui.print(io, "\n");
         return;
     };
     defer file.close(io);
     file.writeStreamingAll(io, refined.items) catch {
-        printStderr(io, "refine: não consegui regravar ");
-        printStderr(io, out_path);
-        printStderr(io, "\n");
+        ui.print(io, "refine: não consegui regravar ");
+        ui.print(io, out_path);
+        ui.print(io, "\n");
         return;
     };
 
-    printStderr(io, "Transcrição refinada: ");
-    printStderr(io, out_path);
-    printStderr(io, "\n");
+    ui.print(io, "Transcrição refinada: ");
+    ui.print(io, out_path);
+    ui.print(io, "\n");
 }
 
 /// curl's stderr tail flattened to a single line — newlines become one
@@ -380,10 +391,6 @@ fn flattenTail(tail: []u8, len: usize) []const u8 {
         n += 1;
     }
     return tail[0..n];
-}
-
-fn printStderr(io: std.Io, msg: []const u8) void {
-    std.Io.File.writeStreamingAll(.stderr(), io, msg) catch {};
 }
 
 // --- tests -------------------------------------------------------------------

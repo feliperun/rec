@@ -515,6 +515,7 @@ pub const max_prompt_bytes: usize = 4 * 1024 * 1024;
 pub const max_output_bytes: usize = 8 * 1024 * 1024;
 
 pub const InvokeError = error{
+    Canceled,
     /// The harness binary was not found at `bin_path`.
     BinaryMissing,
     SpawnFailed,
@@ -533,6 +534,7 @@ pub const InvokeError = error{
 /// invocation error so wording stays identical across setup/transcribe/format.
 pub fn failurePhrase(err: InvokeError) []const u8 {
     return switch (err) {
+        error.Canceled => "operação cancelada",
         error.BinaryMissing => "binário do harness desapareceu",
         error.SpawnFailed => "falha ao iniciar o processo",
         error.TimedOut => "tempo esgotado",
@@ -708,6 +710,7 @@ pub fn run(
         var stderr_open = true;
 
         while (stdin_open or stdout_open or stderr_open) {
+            try io.checkCancel();
             if (std.Io.Timestamp.now(io, .awake).nanoseconds >= deadline.nanoseconds) {
                 return error.TimedOut;
             }
@@ -849,12 +852,14 @@ fn runChildViaFiles(
             else => error.SpawnFailed,
         };
     };
+    defer child.kill(io);
     // The child holds its own inherited handles now.
     in_file.close(io);
     out_file.close(io);
     err_file.close(io);
 
     while (true) {
+        try io.checkCancel();
         const now = std.Io.Timestamp.now(io, .awake);
         if (now.nanoseconds >= deadline.nanoseconds) {
             _ = TerminateProcess(child.id.?, 1);
@@ -862,7 +867,7 @@ fn runChildViaFiles(
             return error.TimedOut;
         }
         const remaining_ns: u64 = @intCast(deadline.nanoseconds - now.nanoseconds);
-        const ms: u32 = @intCast(@min(remaining_ns / 1_000_000, std.math.maxInt(u32)));
+        const ms: u32 = @intCast(@min(remaining_ns / 1_000_000, 200));
         if (WaitForSingleObject(child.id.?, ms) == wait_object_0) break;
     }
     switch (child.wait(io) catch return error.SpawnFailed) {

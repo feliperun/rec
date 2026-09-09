@@ -64,3 +64,4 @@ proposed → active → superseded
 | [0016](0016-markdown-viewer-and-sharing.md) | Use one terminal Markdown viewer for notes and sharing | active |
 | [0017](0017-full-color-playback-waveform.md) | Keep every playback waveform column colored | active |
 | [0018](0018-scrollable-terminal-documents.md) | Indexed scrollable terminal documents | active |
+| [0019](0019-audio-note-sessions.md) | Generate and read audio notes inside playback | active |
