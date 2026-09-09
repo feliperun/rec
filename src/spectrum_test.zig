@@ -46,3 +46,12 @@ test "pause freezes history and seeking clears old energy" {
     analysis.update(&pcm, 48000, 2, 0);
     for (analysis.history) |row| for (row) |v| try std.testing.expectEqual(@as(f32, 0), v);
 }
+
+test "steady DC offset does not appear as audible band energy" {
+    var pcm: [4096 * 4]u8 = undefined;
+    for (0..pcm.len / 2) |i| std.mem.writeInt(i16, pcm[i * 2 ..][0..2], 8192, .little);
+    var analysis = spectrum.Analysis{};
+    analysis.update(&pcm, 48000, 2, 4096);
+    for (analysis.energy) |v| try std.testing.expectEqual(@as(f32, 0), v);
+    for (analysis.scope) |point| try std.testing.expectEqual([2]f32{ 0, 0 }, point);
+}

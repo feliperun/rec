@@ -26,6 +26,7 @@ pub const Analysis = struct {
         var input: [window_frames * 2]f32 = @splat(0);
         const count: usize = @min(end, window_frames);
         readWindow(pcm, stride, end - count, input[(window_frames - count) * 2 ..]);
+        removeOffset(&input);
         self.measure(&input, rate);
         self.trace(&input);
         var depth: usize = history_len - 1;
@@ -66,6 +67,14 @@ pub const Analysis = struct {
         for (&self.scope, 0..) |*point, x| point.* = .{ input[(start + x) * 2], input[(start + x) * 2 + 1] };
     }
 };
+
+// Restarting a filter on an offset window otherwise manufactures a transient.
+fn removeOffset(input: []f32) void {
+    var mean: [2]f32 = @splat(0);
+    for (input, 0..) |value, i| mean[i % 2] += value;
+    for (&mean) |*value| value.* /= @as(f32, @floatFromInt(input.len / 2));
+    for (input, 0..) |*value, i| value.* -= mean[i % 2];
+}
 
 fn readWindow(pcm: []const u8, stride: usize, start: usize, output: []f32) void {
     for (0..output.len / 2) |i| {

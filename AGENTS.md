@@ -152,6 +152,11 @@ file — keep appending.
   fractional-width spectrum bars exercise this in `src/spectrum_test.zig` and
   `src/visualizer.zig`.
 
+- **A DC offset is not audible band energy.** The display's windowed band-pass
+  bank must remove each channel's mean before restarting the filters, or every
+  window invents a low-frequency transient. Keep the steady-offset regression in
+  `src/spectrum_test.zig` and the centering step in `src/spectrum.zig`.
+
 ---
 
 Adapted from [Marcos Hernanz](https://x.com/MarcosHernanz/status/2083954734487212511).
