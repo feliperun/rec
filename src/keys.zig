@@ -1,6 +1,6 @@
-//! Raw-mode keystrokes: read one key from stdin (plain byte, arrow keys,
-//! or their SHIFT variants) and classify escape sequences. Shared by the
-//! live views' key loops; parsing is pure so it is testable offline.
+//! Raw-mode keystrokes: read one key from stdin (plain byte, arrow, paging,
+//! Home/End keys, or their SHIFT variants) and classify escape sequences.
+//! Live view key loops share it; parsing is pure so it is testable offline.
 //! Also owns the stdin terminal state: `enableRaw`/`restoreRaw` are the
 //! one switch point for cooked↔raw on POSIX (termios) and Windows
 //! (SetConsoleMode VT input, where Ctrl-C arrives as the 0x03 byte just
@@ -17,6 +17,14 @@ pub const Key = union(enum) {
     right,
     shift_left,
     shift_right,
+    up,
+    down,
+    page_up,
+    page_down,
+    home,
+    end,
+    wheel_up,
+    wheel_down,
     delete,
 };
 
@@ -86,66 +94,17 @@ pub fn restoreRaw(cooked: Cooked) void {
 /// spends it: a closed stdin reports readable forever and would otherwise
 /// answer .eof instantly, spinning the caller's tick loop at full speed.
 pub fn readKey(io: std.Io, ms: i32) Key {
-    if (builtin.os.tag == .windows) {
-        const win = stdInput() orelse return .none;
-        const wait = WaitForSingleObject(win, @intCast(@max(ms, 0)));
-        // WAIT_TIMEOUT already spent the whole pacing window; a failed wait
-        // returned at once and must burn it like the read failures below.
-        if (wait != wait_object_0) {
-            if (wait != wait_timeout) burnWindow(io, ms);
-            return .none;
-        }
-        var buf: [32]u8 = undefined;
-        var got: u32 = 0;
-        const read_ok = ReadFile(win, &buf, buf.len, &got, null) != 0;
-        if (!read_ok or got == 0) {
-            burnWindow(io, ms);
-            return if (read_ok) .eof else .none;
-        }
-        var len: usize = got;
-
-        // An escape sequence may arrive split across reads; collect the rest.
-        if (buf[0] == 0x1b) {
-            while (!sequenceComplete(buf[0..len]) and len < buf.len and waitReadable(20)) {
-                var more: u32 = 0;
-                if (ReadFile(win, buf[len..].ptr, @intCast(buf.len - len), &more, null) == 0) break;
-                if (more == 0) break;
-                len += more;
-            }
-        }
-        return parseKey(buf[0..len]);
-    }
-    var fds = [_]std.posix.pollfd{.{
-        .fd = 0,
-        .events = std.posix.POLL.IN,
-        .revents = undefined,
-    }};
-    const ready = std.posix.poll(&fds, ms) catch {
-        burnWindow(io, ms);
-        return .none;
-    };
-    if (ready == 0) return .none;
-
+    if (!waitReadable(ms)) return .none;
     var buf: [32]u8 = undefined;
-    const n = std.posix.read(0, &buf) catch {
-        burnWindow(io, ms);
-        return .none;
-    };
-    if (n == 0) {
-        // A closed stdin reports readable forever, so poll answered at once
-        // and the pacing window was lost; burn it before reporting .eof, or
-        // a key loop on a closed stdin would spin at full speed.
+    if (!readByte(&buf[0])) {
         burnWindow(io, ms);
         return .eof;
     }
-    var len: usize = n;
-
-    // An escape sequence may arrive split across writes; collect the rest.
+    var len: usize = 1;
     if (buf[0] == 0x1b) {
         while (!sequenceComplete(buf[0..len]) and len < buf.len and waitReadable(20)) {
-            const more = std.posix.read(0, buf[len..]) catch break;
-            if (more == 0) break;
-            len += more;
+            if (!readByte(&buf[len])) break;
+            len += 1;
         }
     }
     return parseKey(buf[0..len]);
@@ -199,8 +158,9 @@ pub fn sequenceComplete(seq: []const u8) bool {
 
 /// Classifies a raw keystroke: a plain byte (the Delete key in its
 /// backspace spelling included), the arrow keys (xterm CSI `ESC [ 1;2C` and
-/// legacy SS3 `ESC O C`, SHIFT as the `2` modifier), the xterm Delete key
-/// (`ESC [ 3~`), or nothing for sequences rec has no binding for.
+/// legacy SS3 `ESC O C`, SHIFT as the `2` modifier), scrolling/navigation
+/// keys, the xterm Delete key (`ESC [ 3~`), or nothing for sequences rec has
+/// no binding for.
 pub fn parseKey(seq: []const u8) Key {
     if (seq.len == 0) return .none;
     if (seq[0] != 0x1b) {
@@ -211,6 +171,15 @@ pub fn parseKey(seq: []const u8) Key {
     const final = seq[seq.len - 1];
     const params = seq[2 .. seq.len - 1];
 
+    if (std.mem.startsWith(u8, params, "<")) {
+        var mouse = std.mem.splitScalar(u8, params[1..], ';');
+        const button = std.fmt.parseInt(u8, mouse.next() orelse "", 10) catch return .none;
+        return switch (button) {
+            64 => .wheel_up,
+            65 => .wheel_down,
+            else => .none,
+        };
+    }
     var shift = false;
     var it = std.mem.splitScalar(u8, if (seq[1] == '[') params else "", ';');
     while (it.next()) |p| {
@@ -218,12 +187,23 @@ pub fn parseKey(seq: []const u8) Key {
     }
 
     return switch (final) {
+        'A' => .up,
+        'B' => .down,
         'D' => if (shift) .shift_left else .left,
         'C' => if (shift) .shift_right else .right,
+        'H' => .home,
+        'F' => .end,
         '~' => blk: {
-            // xterm Delete is parameter 3; every other ~ key is unbound.
+            // xterm navigation uses 1/4 or 7/8 for Home/End and 5/6 for
+            // paging; Delete is parameter 3.
             var first = std.mem.splitScalar(u8, params, ';');
-            break :blk if (std.mem.eql(u8, first.next() orelse "", "3")) .delete else .none;
+            const number = first.next() orelse "";
+            if (std.mem.eql(u8, number, "1") or std.mem.eql(u8, number, "7")) break :blk .home;
+            if (std.mem.eql(u8, number, "3")) break :blk .delete;
+            if (std.mem.eql(u8, number, "4") or std.mem.eql(u8, number, "8")) break :blk .end;
+            if (std.mem.eql(u8, number, "5")) break :blk .page_up;
+            if (std.mem.eql(u8, number, "6")) break :blk .page_down;
+            break :blk .none;
         },
         else => .none,
     };
@@ -245,8 +225,12 @@ test "parseKey classifies arrow keys and their shift variants" {
     try std.testing.expectEqual(Key.shift_right, parseKey("\x1b[1;2C"));
     // Application cursor mode sends SS3.
     try std.testing.expectEqual(Key.right, parseKey("\x1bOC"));
-    // Unbound sequences (Home, F-keys) classify to nothing.
-    try std.testing.expectEqual(Key.none, parseKey("\x1b[A"));
+    try std.testing.expectEqual(Key.up, parseKey("\x1b[A"));
+    try std.testing.expectEqual(Key.down, parseKey("\x1b[B"));
+    try std.testing.expectEqual(Key.home, parseKey("\x1b[H"));
+    try std.testing.expectEqual(Key.end, parseKey("\x1b[F"));
+    try std.testing.expectEqual(Key.page_up, parseKey("\x1b[5~"));
+    try std.testing.expectEqual(Key.page_down, parseKey("\x1b[6~"));
     try std.testing.expectEqual(Key.none, parseKey("\x1b[15~"));
 }
 
@@ -301,4 +285,32 @@ test "readKey keeps the tick pacing on a closed stdin" {
     // Two 50 ms windows: an unbounded loop answers in microseconds; even a
     // heavily loaded runner stays far above a single window.
     try std.testing.expect(waited_ns > 80 * std.time.ns_per_ms);
+}
+
+test "readKey preserves a burst of keys and escape sequences" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    const C = struct {
+        extern "c" fn pipe(fds: *[2]c_int) c_int;
+        extern "c" fn dup(fd: c_int) c_int;
+        extern "c" fn dup2(old: c_int, new: c_int) c_int;
+        extern "c" fn close(fd: c_int) c_int;
+        extern "c" fn write(fd: c_int, data: [*]const u8, size: usize) isize;
+    };
+    var fds: [2]c_int = undefined;
+    try std.testing.expect(C.pipe(&fds) == 0);
+    defer _ = C.close(fds[0]);
+    defer _ = C.close(fds[1]);
+    const saved = C.dup(0);
+    defer _ = C.close(saved);
+    defer _ = C.dup2(saved, 0);
+    try std.testing.expect(C.dup2(fds[0], 0) == 0);
+    const burst = "jk\x1b[Bq";
+    try std.testing.expect(C.write(fds[1], burst, burst.len) == burst.len);
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    try std.testing.expectEqual(Key{ .byte = 'j' }, readKey(io, 1));
+    try std.testing.expectEqual(Key{ .byte = 'k' }, readKey(io, 1));
+    try std.testing.expectEqual(Key.down, readKey(io, 1));
+    try std.testing.expectEqual(Key{ .byte = 'q' }, readKey(io, 1));
 }

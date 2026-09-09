@@ -48,24 +48,30 @@ pub fn render(gpa: std.mem.Allocator, params: RenderParams, utterances: []const 
 
     try out.appendSlice(gpa, "\n---\n");
 
-    // Diarization survives only as paragraph structure — per-utterance
-    // timestamps and speaker labels stay out of the file on purpose:
-    // consecutive utterances of one speaker join into a single paragraph,
-    // a speaker change starts a new one. Text is verbatim; exactly one
-    // trailing newline keeps diffs stable.
-    var prev_speaker: ?u32 = null;
+    // Keep the timing Deepgram returned in the Markdown body. The format
+    // command can now use the exact spoken intervals instead of reconstructing
+    // them from an already-flattened paragraph.
     for (utterances) |u| {
-        if (prev_speaker) |s| {
-            if (u.speaker == s) try out.append(gpa, ' ') else try out.appendSlice(gpa, "\n\n");
-        } else {
-            try out.append(gpa, '\n');
-        }
+        try out.append(gpa, '\n');
+        try out.append(gpa, '[');
+        try appendClock(gpa, &out, u.start_sec);
+        try out.appendSlice(gpa, "–");
+        try appendClock(gpa, &out, u.end_sec);
+        try out.print(gpa, "] Speaker {d}: ", .{u.speaker});
         try out.appendSlice(gpa, u.text);
-        prev_speaker = u.speaker;
+        try out.appendSlice(gpa, "\n");
     }
     try out.append(gpa, '\n');
 
     return out.toOwnedSlice(gpa);
+}
+
+fn appendClock(gpa: std.mem.Allocator, out: *std.ArrayList(u8), sec: f64) std.mem.Allocator.Error!void {
+    const total: u64 = @intFromFloat(@max(sec + 0.5, 0.0));
+    const hours = total / 3600;
+    const minutes = (total / 60) % 60;
+    const seconds = total % 60;
+    try out.print(gpa, "{d:0>2}:{d:0>2}:{d:0>2}", .{ hours, minutes, seconds });
 }
 
 // libc time functions (libc is already linked for miniaudio): UTC naming
@@ -205,14 +211,15 @@ test "renders the spec's golden document byte-for-byte" {
         \\duration_sec: 12.5
         \\---
         \\
-        \\Bom dia.
+        \\[00:00:00–00:00:02] Speaker 0: Bom dia.
         \\
-        \\Tudo bem?
+        \\[00:00:02–00:00:05] Speaker 1: Tudo bem?
+        \\
         \\
     , doc);
 }
 
-test "same-speaker utterances merge into one paragraph; a change starts another" {
+test "every utterance keeps its timing and speaker" {
     const utterances = [_]transcribe.Utterance{
         .{ .start_sec = 0.0, .end_sec = 1.0, .speaker = 0, .text = @constCast("Bom dia.") },
         .{ .start_sec = 1.2, .end_sec = 2.0, .speaker = 0, .text = @constCast("Como vai?") },
@@ -230,7 +237,7 @@ test "same-speaker utterances merge into one paragraph; a change starts another"
     }, &utterances);
     defer std.testing.allocator.free(doc);
 
-    try std.testing.expectEqualStrings("\n---\n\nBom dia. Como vai?\n\nTudo bem. E você?\n\nÓtimo.\n", doc[std.mem.indexOf(u8, doc, "\n---\n").?..]);
+    try std.testing.expectEqualStrings("\n---\n\n[00:00:00–00:00:01] Speaker 0: Bom dia.\n\n[00:00:01–00:00:02] Speaker 0: Como vai?\n\n[00:00:02–00:00:03] Speaker 1: Tudo bem.\n\n[00:00:03–00:00:04] Speaker 1: E você?\n\n[00:00:04–00:00:05] Speaker 0: Ótimo.\n\n", doc[std.mem.indexOf(u8, doc, "\n---\n").?..]);
 }
 
 test "omits null duration and keeps transcript text verbatim" {
@@ -259,8 +266,9 @@ test "omits null duration and keeps transcript text verbatim" {
         \\language: en
         \\---
         \\
-        \\Yes | no
+        \\[01:00:00–01:01:01] Speaker 2: Yes | no
         \\maybe
+        \\
         \\
     , doc);
 }

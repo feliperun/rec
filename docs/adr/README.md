@@ -61,3 +61,6 @@ proposed → active → superseded
 | [0013](0013-cross-platform-builds.md) | Cross-platform builds: one zig toolchain, three native test runners | active |
 | [0014](0014-self-update-from-github-releases.md) | Self-update from GitHub Releases | active |
 | [0015](0015-layered-eighth-block-waveform.md) | Layered eighth-block waveform with a scrolling recorder and a time ruler | active |
+| [0016](0016-markdown-viewer-and-sharing.md) | Use one terminal Markdown viewer for notes and sharing | active |
+| [0017](0017-full-color-playback-waveform.md) | Keep every playback waveform column colored | active |
+| [0018](0018-scrollable-terminal-documents.md) | Indexed scrollable terminal documents | active |
