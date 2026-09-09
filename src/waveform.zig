@@ -484,13 +484,13 @@ pub fn termSize() TermSize {
         if (GetConsoleScreenBufferInfo(h, &info) != 0) {
             const cols: i32 = @as(i32, info.sr_window.right) - info.sr_window.left + 1;
             const rows: i32 = @as(i32, info.sr_window.bottom) - info.sr_window.top + 1;
-            if (cols >= 2 and rows >= 1) return .{ .cols = @as(usize, @intCast(cols)) - 1, .rows = @intCast(rows) };
+            if (cols >= 1 and rows >= 1) return .{ .cols = @max(@as(usize, @intCast(cols)) - 1, 1), .rows = @intCast(rows) };
         }
         return default_size;
     }
     var ws: Winsize = .{ .rows = 0, .cols = 0, .xpixel = 0, .ypixel = 0 };
-    if (ioctl(2, tiocgwinsz, &ws) == 0 and ws.cols >= 2 and ws.rows >= 1) {
-        return .{ .cols = ws.cols - 1, .rows = ws.rows };
+    if (ioctl(2, tiocgwinsz, &ws) == 0 and ws.cols >= 1 and ws.rows >= 1) {
+        return .{ .cols = @max(ws.cols - 1, 1), .rows = ws.rows };
     }
     return default_size;
 }

@@ -11,7 +11,11 @@
 | Transport / OS boundary | `capture.zig`, `player.zig`, `transcribe.zig` | Wrap one external producer/consumer (input device, output device, HTTP) |
 | Format | `wav.zig`, `okf.zig` | Encode/decode one on-disk format each; no policy |
 | Domain | `library.zig` | The recordings collection: scan, sort, resolve `index|filename` selections |
-| Presentation | `main.zig`, `record.zig`, `playback.zig` | CLI surface and the live views over the same verbs |
+| Presentation | `main.zig`, `record.zig`, `playback.zig`, `deck.zig`, `visualizer.zig` | CLI, interactive transport, responsive layout and pure visual rendering |
+
+The listening room analyzes immutable PCM through `spectrum.zig`; its fixed-size
+measurements flow into the pure visual renderer. Neither the renderer nor the
+analysis runs on miniaudio's callback thread. See [ADR 0020](adr/0020-audio-reactive-listening-room.md).
 
 ## External systems
 

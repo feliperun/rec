@@ -167,19 +167,38 @@ decoded once and the same PCM feeds the waveform and the speaker. The
 selection can be an index from `list` or a filename (with or without the
 `recordings/` prefix); with none, the latest recording plays.
 
-On a terminal, playback is interactive: the whole recording fitted to the
-terminal's width as the same layered waveform the recorder draws, a time
-ruler under it, and a playhead line walking over it at the playback position
-(on the alternate screen). The entire waveform stays in color; a region
-marked for cutting turns magenta between its two thin anchor lines, so you see
-exactly what goes before you confirm. When the recording has a transcript
-(`NAME.md`) its text opens below the waveform. Transcript and formatted notes
-(`NAME.meeting.md`) are tabs in the same audio session. Audio and text share one
-scrollable page: scroll down to read, and Home returns to the waveform. Keys:
+On a terminal, playback opens a **listening room**. Aurora draws luminous trails
+from the audio's frequency bands; `V` switches to a peak-holding spectrum or a
+stereo oscilloscope. `Z` expands the visual into focus mode. The animation follows
+the actual audio and freezes when paused. The player uses Unicode and 256 colors,
+works in Terminal.app, and respects `NO_COLOR`.
+
+<img src="docs/player.gif" alt="The rec listening room: an audio-reactive Aurora, spectrum bars and stereo scope, all rendered in the terminal" width="100%">
+
+The whole recording remains visible as a colored waveform with a time ruler and
+playhead. Marking a region turns it magenta between the cut anchors. When a
+transcript (`NAME.md`) exists, it appears below the audio. Transcript and formatted
+notes (`NAME.meeting.md`) are tabs on the same scrollable page. `T` and `F` select
+them; `Home` returns to the audio. Small windows use a compact
+layout. `?` shows the controls.
+
+Try an original synthetic ambient loop in a temporary library after building:
+
+```sh
+zig build -Doptimize=ReleaseSafe
+python3 scripts/demo_player.py
+```
+
+Keys:
 
 | Key | Action |
 |-----|--------|
-| `SPACE` | Pause / resume |
+| `SPACE` | Pause / resume; replay when the recording ends |
+| `V` | Cycle Aurora → Spectrum → Scope |
+| `Z` | Toggle focus mode |
+| `?` | Show / hide controls |
+| `+` / `-` / `M` | Adjust playback volume / toggle mute |
+| `0`–`9` | Seek to 0–90% of the recording |
 | `←` / `→` | Seek 1 second back / forward |
 | `SHIFT`+`←` / `SHIFT`+`→` | Seek 5 seconds back / forward |
 | `I` / `O` | Anchor the start / end of the region to cut |

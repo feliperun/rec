@@ -50,7 +50,10 @@ jobs:
           path: zig-out/bin/
 
   viewer:
-    runs-on: macos-14
+    strategy:
+      matrix:
+        os: [macos-14, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: mlugg/setup-zig@v2
@@ -60,3 +63,4 @@ jobs:
       - run: python3 scripts/e2e_viewer.py
       - run: python3 scripts/e2e_playback_notes.py
       - run: python3 scripts/e2e_notes_jobs.py
+      - run: python3 scripts/e2e_player.py
