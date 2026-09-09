@@ -58,3 +58,5 @@ jobs:
           version: "0.16.0"
       - run: zig build -Dsilent-input=true
       - run: python3 scripts/e2e_viewer.py
+      - run: python3 scripts/e2e_playback_notes.py
+      - run: python3 scripts/e2e_notes_jobs.py

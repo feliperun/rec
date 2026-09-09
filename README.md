@@ -173,8 +173,9 @@ ruler under it, and a playhead line walking over it at the playback position
 (on the alternate screen). The entire waveform stays in color; a region
 marked for cutting turns magenta between its two thin anchor lines, so you see
 exactly what goes before you confirm. When the recording has a transcript
-(`NAME.md`) it opens below the waveform in the Markdown viewer. Audio and text share one scrollable page: scroll down to read, and Home returns
-to the waveform. Keys:
+(`NAME.md`) its text opens below the waveform. Transcript and formatted notes
+(`NAME.meeting.md`) are tabs in the same audio session. Audio and text share one
+scrollable page: scroll down to read, and Home returns to the waveform. Keys:
 
 | Key | Action |
 |-----|--------|
@@ -183,26 +184,35 @@ to the waveform. Keys:
 | `SHIFT`+`←` / `SHIFT`+`→` | Seek 5 seconds back / forward |
 | `I` / `O` | Anchor the start / end of the region to cut |
 | `DELETE` | Ask to remove the anchored region — `ENTER` confirms |
-| `T` | Jump to the transcript, or transcribe when absent |
-| `Y` | Copy the transcript to the clipboard |
-| `S` | Share the transcript to the clipboard |
+| `T` | Select the transcript; generate it when absent |
+| `F` | Select formatted notes; generate them when absent |
+| `Tab` | Switch tabs without starting generation |
+| `Y` | Copy the active tab’s Markdown to the clipboard |
+| `S` | Share the active tab’s Markdown to the clipboard |
 | `C` / `L` / `G` | Open it in ChatGPT / Claude / Gemini |
-| `↑` / `↓` / mouse wheel / `PgUp` / `PgDn` | Scroll audio and transcript |
+| `↑` / `↓` / mouse wheel / `PgUp` / `PgDn` | Scroll audio and the selected document |
 | `Home` / `End` | Jump to the waveform / end of the document |
 | `R` | Clear the anchors |
 | `Q` / `Ctrl-C` | Stop playback |
 
+Transcription and formatting run in the background without closing the waveform
+or interrupting playback. F uses the `meeting` template and first transcribes
+when needed. Existing documents open immediately; repeated keys do not duplicate
+jobs. Failures stay in the selected tab; press T or F to retry. Q cancels any
+pending job. Copy/share uses the complete saved Markdown of the active tab;
+frontmatter is hidden in the playback reading view.
+
 Cutting removes the piece between the anchors (head, tail, or middle) after
 `ENTER` confirms the prompt, replaces the original file, and keeps the player
 open after the shortened audio is reloaded. The transcript (`NAME.md`) is left
-untouched.
+untouched. Cutting waits until text generation finishes.
 
 Off a terminal (piped output), playback runs to completion; `Ctrl-C` stops it.
 
 The Markdown viewer wraps to the terminal width, stays still while idle, and
 supports `↑`/`↓`, `PgUp`/`PgDn`, `Home`, and `End` so the complete document is
-readable. Playback stays open at EOF; SPACE replays it. Press T to read while audio keeps
-playing, and Home to return to its waveform.
+readable. Playback stays open at EOF; SPACE replays it. T and F switch documents
+with the waveform at the top; Home returns there after scrolling.
 
 Use `rec view path.md` to reopen a saved transcript or formatted document.
 

@@ -168,7 +168,7 @@ pub fn shareKey(io: std.Io, doc: []const u8, key: u8) ?[]const u8 {
         'g', 'G' => .gemini,
         else => return null,
     };
-    if (doc.len == 0) return "No transcript to share";
+    if (doc.len == 0) return "No text to share";
     return if (share.shareText(io, doc, destination)) if (destination == .clipboard) "Copied · C ChatGPT · L Claude · G Gemini" else "Copied · Paste in the opened app" else "Could not share · Y copies the text";
 }
 
