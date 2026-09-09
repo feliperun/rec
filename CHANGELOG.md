@@ -1,5 +1,20 @@
 # Changelog
 
+## [3.1.0](https://github.com/feliperun/rec/compare/v3.0.0...v3.1.0) (2026-09-09)
+
+
+### Features
+
+* add an audio-reactive terminal listening room ([8f4914f](https://github.com/feliperun/rec/commit/8f4914f11d3760d347b2f6eb6aadcfc38dcff2e4))
+* add an audio-reactive terminal listening room ([f9f718d](https://github.com/feliperun/rec/commit/f9f718df8fec78259cf36fa0c8b987932f4b6a11))
+* generate and read notes without leaving audio playback ([dbd20aa](https://github.com/feliperun/rec/commit/dbd20aad0ad23fe1729fbb223dcbf3539f924f0f))
+* generate and read notes without leaving audio playback ([b2a7ed9](https://github.com/feliperun/rec/commit/b2a7ed988847041ca5bb252b01517ddf5216356f))
+
+
+### Bug Fixes
+
+* remove DC offset from audio visualization ([e93c90f](https://github.com/feliperun/rec/commit/e93c90fb10b3759885273c64c33d4969730a3400))
+
 ## [3.0.0](https://github.com/feliperun/rec/compare/v2.0.0...v3.0.0) (2026-09-09)
 
 
