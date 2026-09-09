@@ -11,7 +11,7 @@ to markdown through Deepgram, and let a local coding-agent LLM clean up the
 transcript or turn it into structured meeting notes. One small Zig binary,
 no Electron, no servers of its own.
 
-<img src="docs/demo.gif" alt="rec recording with a live waveform, then playing back, cutting a region out with two anchors and a confirmed delete, and listing the library" width="100%">
+<img src="docs/demo.gif" alt="rec playing synthetic audio with Aurora trails, spectrum bars and stereo scope, then switching between transcript and formatted notes" width="100%">
 
 ```
 $ rec                      # records until ESC or Ctrl-C
@@ -173,7 +173,7 @@ stereo oscilloscope. `Z` expands the visual into focus mode. The animation follo
 the actual audio and freezes when paused. The player uses Unicode and 256 colors,
 works in Terminal.app, and respects `NO_COLOR`.
 
-<img src="docs/player.gif" alt="The rec listening room: an audio-reactive Aurora, spectrum bars and stereo scope, all rendered in the terminal" width="100%">
+<img src="docs/player.png" alt="The rec listening room showing Aurora trails, the recording overview, playback controls and a synthetic transcript" width="100%">
 
 The whole recording remains visible as a colored waveform with a time ruler and
 playhead. Marking a region turns it magenta between the cut anchors. When a

@@ -19,6 +19,19 @@ def prepare(root):
     config = root / '.config/rec'
     config.mkdir(parents=True, exist_ok=True)
     (config / 'update_state').write_text(str(int(time.time())))
+    (recs / 'Northern Lights.md').write_text(
+        '# Listening session\n\n'
+        '[00:00:03–00:00:08] Speaker 1: Let the low notes breathe.\n\n'
+        '[00:00:08–00:00:14] Speaker 2: Keep the melody light and the stereo field wide.\n'
+    )
+    (recs / 'Northern Lights.meeting.md').write_text(
+        '# Northern Lights — session notes\n\n'
+        '## Direction\n\n'
+        'A quiet pulse, a spacious melody, and room to listen.\n\n'
+        '## Next take\n\n'
+        '- Keep the warm bass and delicate upper notes.\n'
+        '- Leave space between phrases.\n'
+    )
     path = recs / 'Northern Lights.wav'
     if path.exists():
         return
