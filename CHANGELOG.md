@@ -1,5 +1,16 @@
 # Changelog
 
+## [3.0.0](https://github.com/feliperun/rec/compare/v2.0.0...v3.0.0) (2026-09-09)
+
+
+### ⚠ BREAKING CHANGES
+
+* transcript bodies retain timestamp ranges and speaker prefixes for each utterance instead of merged prose-only paragraphs.
+
+### Features
+
+* deliver responsive audio and transcript reading ([4c101af](https://github.com/feliperun/rec/commit/4c101af9a9754901a018696851e1f24c746079ac))
+
 ## [2.0.0](https://github.com/feliperun/rec/compare/v1.8.2...v2.0.0) (2026-09-08)
 
 
