@@ -27,6 +27,8 @@ format: processando com Claude Code...
 Documento salvo em ~/recordings/20260826-093000.meeting.md
 ```
 
+Both saved Markdown artifacts open immediately in the terminal viewer.
+
 Every verb that takes a recording defaults to the latest one, so the daily
 loop is `rec` → `rec transcribe` → `rec format` with nothing to look up.
 
@@ -131,6 +133,9 @@ stays clean and resizing the window mid-recording never scrambles the
 display. The container is always finalized — a failed encode leaves no
 partial file behind.
 
+When an interactive recording is stopped with `ESC` or `Ctrl-C`, the new take
+opens immediately in playback so it can be checked before the next command.
+
 Recordings of at least 10 seconds warn after saving if the audio stayed very
 quiet (below −40 dBFS RMS in every measured window). The file is preserved.
 Check the selected input and its volume, then listen to a short test recording
@@ -165,10 +170,11 @@ selection can be an index from `list` or a filename (with or without the
 On a terminal, playback is interactive: the whole recording fitted to the
 terminal's width as the same layered waveform the recorder draws, a time
 ruler under it, and a playhead line walking over it at the playback position
-(on the alternate screen). The part already played is in color, the rest
-gray; a region marked for cutting turns magenta between its two thin anchor
-lines, so you see exactly what goes before you confirm. When the recording
-has a transcript (`NAME.md`) it is printed in full first. Keys:
+(on the alternate screen). The entire waveform stays in color; a region
+marked for cutting turns magenta between its two thin anchor lines, so you see
+exactly what goes before you confirm. When the recording has a transcript
+(`NAME.md`) it opens below the waveform in the Markdown viewer. Audio and text share one scrollable page: scroll down to read, and Home returns
+to the waveform. Keys:
 
 | Key | Action |
 |-----|--------|
@@ -177,17 +183,28 @@ has a transcript (`NAME.md`) it is printed in full first. Keys:
 | `SHIFT`+`←` / `SHIFT`+`→` | Seek 5 seconds back / forward |
 | `I` / `O` | Anchor the start / end of the region to cut |
 | `DELETE` | Ask to remove the anchored region — `ENTER` confirms |
-| `T` | Transcribe the recording, or open the transcript if it has one |
+| `T` | Jump to the transcript, or transcribe when absent |
+| `Y` | Copy the transcript to the clipboard |
+| `S` | Share the transcript to the clipboard |
+| `C` / `L` / `G` | Open it in ChatGPT / Claude / Gemini |
+| `↑` / `↓` / mouse wheel / `PgUp` / `PgDn` | Scroll audio and transcript |
+| `Home` / `End` | Jump to the waveform / end of the document |
 | `R` | Clear the anchors |
 | `Q` / `Ctrl-C` | Stop playback |
 
 Cutting removes the piece between the anchors (head, tail, or middle) after
-`ENTER` confirms the prompt, replaces the original file, and keeps playing —
-the waveform redraws from the shortened recording and the playhead lands
-where it was; a note under the grid confirms the cut. The transcript
-(`NAME.md`) is left untouched.
+`ENTER` confirms the prompt, replaces the original file, and keeps the player
+open after the shortened audio is reloaded. The transcript (`NAME.md`) is left
+untouched.
 
 Off a terminal (piped output), playback runs to completion; `Ctrl-C` stops it.
+
+The Markdown viewer wraps to the terminal width, stays still while idle, and
+supports `↑`/`↓`, `PgUp`/`PgDn`, `Home`, and `End` so the complete document is
+readable. Playback stays open at EOF; SPACE replays it. Press T to read while audio keeps
+playing, and Home to return to its waveform.
+
+Use `rec view path.md` to reopen a saved transcript or formatted document.
 
 ### transcribe
 
@@ -205,6 +222,9 @@ the transcript metadata. `--language <code>` forces a language (for example,
 `pt-BR` or `en`); `--language auto` restores detection. A mismatched language can
 produce an empty transcript even when the recording contains clear speech.
 `--out` writes elsewhere.
+
+Each speaker turn keeps its Deepgram timing in the body, for example
+`[00:01:12–00:01:16] Speaker 1: ...`, so `rec format` can use it.
 
 Then, by default, **the refine pass runs**: the transcript travels through
 your configured LLM together with the bundled *refine* prompt, which fixes
@@ -239,6 +259,21 @@ plain markdown prompts under `~/.config/rec/templates/` — `meeting.md` and
 upgrades never overwrite your edits. Add a `retro.md` and it instantly
 becomes `rec format 1 --template retro`. Unknown names list what's
 available; a read-only config dir falls back to the embedded copies.
+
+The formatted document opens in the Markdown viewer after it is saved. Press
+`y` to copy its original Markdown, `s` to share to the clipboard, or `c`, `l`,
+and `g` to open ChatGPT, Claude, and Gemini.
+
+### share
+
+```sh
+rec share [index|path] [--to clipboard|chatgpt|claude|gemini]
+```
+
+Shares a transcript or any Markdown path. The default destination is the
+clipboard; the other destinations copy the full Markdown and open the chosen
+website. Paste into its composer. This also works with long documents without
+URL length limits; it does not automatically submit a prompt.
 
 ### setup
 
@@ -290,12 +325,13 @@ rec help        # also: rec --help, rec -h
 The live views (record, play) and the `list` table are colored on a
 terminal: the waveform rows climb a VU ramp from the midline outward (blue →
 cyan → green → yellow → red) with the RMS core brighter than the peak halo,
-the unplayed part is gray, a marked region is magenta, the playhead is a
-line in your terminal's default color, the ⏺ recording dot is red, the ▶/⏸
+the playback waveform stays colored at every position, a marked region is
+magenta, the playhead is a line in your terminal's default color, the ⏺
+recording dot is red, the ▶/⏸
 playback state is green/yellow, and secondary text is dimmed. Piped output
 carries no ANSI codes, so scripts can keep grepping it; set `NO_COLOR` to
 opt out on a terminal too (the waveform shape, the ruler and the playhead
-stay; the unplayed part dims instead of graying).
+stay; color is removed from the waveform).
 
 ## Build from source
 

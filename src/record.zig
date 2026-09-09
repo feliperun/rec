@@ -7,6 +7,11 @@ const ruler = @import("ruler.zig");
 const style = @import("style.zig");
 const waveform = @import("waveform.zig");
 
+/// Set for the completed run when the user explicitly stopped recording. The
+/// CLI uses it to distinguish an interrupted take (which opens playback) from
+/// a `--duration` timeout.
+pub var last_stop_was_interrupt = false;
+
 /// How often the live view redraws, in ms — also the keystroke poll window.
 const tick_ms = 100;
 
@@ -22,6 +27,7 @@ pub fn recordOnce(
     duration_sec: ?f64,
     recordings_path: []const u8,
 ) u8 {
+    last_stop_was_interrupt = false;
     // Reset the per-recording flag before installing the handler, so a stale
     // stop request cannot end this run.
     capture.resetStop();
@@ -166,14 +172,20 @@ pub fn recordOnce(
                         paused = false;
                     }
                 },
-                0x1b, 0x03 => break :loop, // ESC stops, like Ctrl-C
+                0x1b, 0x03 => {
+                    last_stop_was_interrupt = true;
+                    break :loop; // ESC stops, like Ctrl-C
+                },
                 else => {}, // arrows and friends do nothing while recording
             },
             .none => {},
             .eof => {}, // stdin gone; Ctrl-C still stops
             else => {},
         }
-        if (capture.stopRequested()) break :loop;
+        if (capture.stopRequested()) {
+            last_stop_was_interrupt = true;
+            break :loop;
+        }
 
         const now = std.Io.Timestamp.now(io, .awake);
         const active: i128 = if (paused)

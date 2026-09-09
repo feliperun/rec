@@ -89,6 +89,14 @@ was made.
 
 ## rec gotchas
 
+- **Never discard a burst of terminal input or write beyond the viewport.**
+  `keys.readKey` consumes exactly one complete key, leaving the rest queued.
+  `viewport.zig` wraps and indexes text once per width, clips every output row,
+  and suppresses identical frames. The old reader lost key repeats and the old
+  footer wrapped past the last row, making the interface appear frozen or flicker.
+  `scripts/e2e_viewer.py` checks burst input, wheel scrolling, resize, idle output,
+  and returning from long text to audio; see [ADR 0018](docs/adr/0018-scrollable-terminal-documents.md).
+
 Record every failure that cost real debugging time, with the invariant that prevents
 it and a link to the ADR or code that must not be undone. Highest-value part of this
 file — keep appending.

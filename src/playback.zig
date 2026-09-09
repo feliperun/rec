@@ -4,10 +4,11 @@ const keys = @import("keys.zig");
 const library = @import("library.zig");
 const llm = @import("llm.zig");
 const live = @import("live.zig");
+const markdown = @import("markdown.zig");
 const player_mod = @import("player.zig");
-const prompts = @import("prompts.zig");
 const ruler = @import("ruler.zig");
 const style = @import("style.zig");
+const viewport = @import("viewport.zig");
 const transcribecmd = @import("transcribecmd.zig");
 const waveform = @import("waveform.zig");
 
@@ -39,7 +40,7 @@ fn installSigint() void {
 /// one second (SHIFT for five), I and O anchor the two cursors of the
 /// region to cut (drawn as full-height lines with the wave between them
 /// recolored), DELETE asks and ENTER confirms the cut, T transcribes the
-/// recording or opens its transcript, R clears the marks, Q or Ctrl-C
+/// recording or opens its transcript, Y copies it, S shares it, R clears the marks, Q or Ctrl-C
 /// stops. Without a terminal it plays to completion under Ctrl-C.
 pub fn playSelection(io: std.Io, gpa: std.mem.Allocator, selection: []const u8, recordings_path: []const u8) u8 {
     var entries: std.ArrayList(library.Entry) = .empty;
@@ -82,8 +83,14 @@ pub fn playSelection(io: std.Io, gpa: std.mem.Allocator, selection: []const u8, 
         return 1;
     };
 
-    // A transcribed recording shows its transcript in full above the player.
-    printTranscript(io, gpa, recordings_path, name);
+    // Load the sibling Markdown once. Interactive playback renders it in a
+    // panel below the waveform; non-interactive playback prints the same
+    // styled document before the status line.
+    const transcript_raw: ?[]u8 = loadTranscript(io, gpa, recordings_path, name);
+    defer if (transcript_raw) |doc| gpa.free(doc);
+    var transcript_view: ?[]u8 = null;
+    defer if (transcript_view) |view| gpa.free(view);
+    if (transcript_raw) |doc| transcript_view = markdown.render(gpa, doc, style.detect(io, .stderr())) catch null;
 
     // One decode serves both the waveform and the audio: without it there
     // is nothing to draw and nothing to play. The interactive view owns the
@@ -105,9 +112,14 @@ pub fn playSelection(io: std.Io, gpa: std.mem.Allocator, selection: []const u8, 
     };
 
     if (is_tty) {
-        return playInteractive(io, gpa, abs_buf[0..abs_len], &audio, name, duration_sec, recordings_path);
+        return playInteractive(io, gpa, abs_buf[0..abs_len], &audio, name, duration_sec, recordings_path, transcript_raw orelse "", transcript_view orelse "");
     }
 
+    if (transcript_view) |view| {
+        printStderr(io, view);
+        if (view.len == 0 or view[view.len - 1] != '\n') printStderr(io, "\n");
+        printStderr(io, "\n");
+    }
     printStderr(io, "Playing ");
     printStderr(io, name);
     printStderr(io, " (Ctrl-C to stop)\n");
@@ -150,7 +162,7 @@ const seek_step_shift_sec: f64 = 5.0;
 const PlayState = enum { playing, paused };
 
 /// Runs the live view while the player plays: the status line, the
-/// layered waveform (played part in color, the rest gray, the marked region
+/// rendered Markdown transcript panel, and the layered waveform (fully colored, the marked region
 /// recolored between its two anchor lines, the playhead line over
 /// everything), its time ruler, a notes row, and the key hints — one
 /// composed frame per tick. Owns
@@ -165,6 +177,8 @@ fn playInteractive(
     name: []const u8,
     duration_sec_in: f64,
     recordings_path: []const u8,
+    transcript_raw: []const u8,
+    transcript_view: []const u8,
 ) u8 {
     var duration_sec = duration_sec_in;
     const cooked = keys.enableRaw() orelse {
@@ -193,6 +207,7 @@ fn playInteractive(
             on.* = false;
         }
     }.f;
+    defer leaveAlt(io, &alt_on, &esc_buf);
 
     var p = player_mod.Player{};
     defer p.deinit();
@@ -215,7 +230,15 @@ fn playInteractive(
     // many small writes are what made the cursor's movement flicker.
     var frame: std.ArrayList(u8) = .empty;
     defer frame.deinit(gpa);
-    var view = View{};
+    var document = viewport.Document{};
+    defer document.deinit(gpa);
+    var header = viewport.Document{};
+    defer header.deinit(gpa);
+    var screen = viewport.Screen{};
+    defer screen.deinit(gpa);
+    var scroll: usize = 0;
+    printStderr(io, viewport.mouse_on);
+    defer printStderr(io, viewport.mouse_off);
 
     var state: PlayState = .playing;
     var exit_code: u8 = 0;
@@ -233,13 +256,19 @@ fn playInteractive(
     var note: ?[]const u8 = null;
 
     keys: while (true) {
-        if (p.isDone()) break :keys;
+        if (p.isDone()) {
+            state = .paused;
+            p.setPaused(true);
+        }
         if (g_interrupted.load(.acquire)) {
             exit_code = 130;
             break :keys;
         }
 
-        draw(io, gpa, &frame, &view, .{
+        const size = waveform.termSize();
+        if (document.width != size.cols) document.set(gpa, transcript_view, size.cols) catch return 1;
+        const height = if (transcript_view.len > 0) @min(@as(usize, 8), waveform.viewHeight(size.rows / 3)) else waveform.viewHeight(size.rows -| chrome_rows);
+        drawHeader(gpa, &frame, .{
             .state = state,
             .elapsed_sec = p.positionSec(),
             .duration_sec = duration_sec,
@@ -248,7 +277,11 @@ fn playInteractive(
             .mark_out = mark_out,
             .note = note,
             .color = color,
-        });
+        }, @min(size.cols, waveform.max_columns), height);
+        header.set(gpa, frame.items, size.cols) catch return 1;
+        var footer_buf: [192]u8 = undefined;
+        const footer = std.fmt.bufPrint(&footer_buf, "Q quit · ↑↓/wheel scroll · SPACE play · T text · Y copy · S share  {d}/{d}", .{ scroll + 1, header.starts.items.len + document.starts.items.len }) catch "Q quit";
+        screen.paint(io, gpa, &header, &document, &scroll, size.rows, size.cols, footer) catch return 1;
 
         const key = keys.readKey(io, tick_ms);
         if (key == .none) continue :keys; // no key: the notice stays up
@@ -289,8 +322,12 @@ fn playInteractive(
                     exit_code = 1;
                     break :keys;
                 };
-                p.seekSec(mapPosition(pos, span));
-                if (state == .paused) p.setPaused(true);
+                const replay = replayAfterCut(pos, span, duration_sec, audio.sample_rate);
+                p.seekSec(replay.sec);
+                if (replay.pause or state == .paused) {
+                    state = .paused;
+                    p.setPaused(true);
+                }
                 mark_in = null;
                 mark_out = null;
                 note = cutNote(&note_buf, span);
@@ -303,10 +340,12 @@ fn playInteractive(
             continue :keys;
         }
 
+        if (viewport.navigate(&scroll, key, header.starts.items.len + document.starts.items.len, size.rows -| 1)) continue;
         switch (key) {
             .eof => break :keys,
             .byte => |c| switch (c) {
                 ' ' => {
+                    if (p.isDone()) p.seekSec(0);
                     state = if (state == .playing) .paused else .playing;
                     p.setPaused(state == .paused);
                 },
@@ -323,19 +362,29 @@ fn playInteractive(
                     mark_out = null;
                 },
                 't', 'T' => {
-                    // Transcribing (or editing the transcript) takes the
-                    // normal screen and a stopped player.
-                    leaveAlt(io, &alt_on, &esc_buf);
-                    p.stop();
-                    exit_code = openTranscript(io, gpa, name, recordings_path);
-                    break :keys;
+                    if (transcript_raw.len > 0) {
+                        scroll = header.starts.items.len;
+                    } else {
+                        leaveAlt(io, &alt_on, &esc_buf);
+                        p.stop();
+                        exit_code = openTranscript(io, gpa, name, recordings_path);
+                        break :keys;
+                    }
+                },
+                'j' => {
+                    _ = viewport.navigate(&scroll, .down, header.starts.items.len + document.starts.items.len, size.rows -| 1);
+                },
+                'k' => {
+                    _ = viewport.navigate(&scroll, .up, header.starts.items.len + document.starts.items.len, size.rows -| 1);
                 },
                 'q' => break :keys,
                 0x03 => { // Ctrl-C byte: ISIG is off in raw mode
                     exit_code = 130;
                     break :keys;
                 },
-                else => {},
+                else => {
+                    note = markdown.shareKey(io, transcript_raw, c);
+                },
             },
             .delete => {
                 const span = cutSpan(mark_in, mark_out, duration_sec) orelse {
@@ -356,7 +405,7 @@ fn playInteractive(
             .right => p.seekBy(seek_step_sec),
             .shift_left => p.seekBy(-seek_step_shift_sec),
             .shift_right => p.seekBy(seek_step_shift_sec),
-            .none => unreachable,
+            else => {},
         }
     }
 
@@ -372,13 +421,6 @@ fn playInteractive(
 /// ruler's two rows, the notes row, and the key hints.
 const chrome_rows = 5;
 
-/// Geometry the view was last drawn at; zero before the first draw.
-const View = struct {
-    width: usize = 0,
-    height: usize = 0,
-};
-
-/// Everything one frame shows.
 const Frame = struct {
     state: PlayState,
     elapsed_sec: f64,
@@ -390,101 +432,35 @@ const Frame = struct {
     color: bool,
 };
 
-/// Composes the whole view — the status line, the waveform grid (the
-/// playhead line over it, the marked region recolored between its two
-/// anchor lines), the time ruler, a notes row, and the key hints — into
-/// `frame` behind a synchronized-update bracket and writes it once. One
-/// write per tick with the hardware cursor hidden is what keeps the view
-/// from flickering while the playhead moves; a geometry change erases the
-/// screen first, so whatever a resize did to the grid is gone.
-fn draw(io: std.Io, gpa: std.mem.Allocator, frame: *std.ArrayList(u8), view: *View, f: Frame) void {
-    const size = waveform.termSize();
-    const width = @min(size.cols, waveform.max_columns);
-    const height = waveform.viewHeight(size.rows -| chrome_rows);
-    var esc: [16]u8 = undefined;
+/// Audio rows precede the transcript in a single scrollable document.
+fn drawHeader(gpa: std.mem.Allocator, frame: *std.ArrayList(u8), f: Frame, width: usize, height: usize) void {
+    frame.clearRetainingCapacity();
     var line: [waveform.rowBufferLen(waveform.max_columns)]u8 = undefined;
-
+    appendRow(frame, gpa, statusLine(&line, f.state, f.elapsed_sec, f.duration_sec, f.mark_in, f.mark_out, f.color));
     var columns: [waveform.max_columns]waveform.Column = undefined;
     const cols = waveform.layoutColumns(f.blocks, columns[0..width], .fit);
-
-    const cursor = @min(playedCols(width, f.elapsed_sec, f.duration_sec), width -| 1);
-    const has_marks = cutSpan(f.mark_in, f.mark_out, f.duration_sec) != null;
-    const sel: ?waveform.SelRange = if (cutSpan(f.mark_in, f.mark_out, f.duration_sec)) |s|
-        .{ .start_col = playedCols(width, s[0], f.duration_sec), .end_col = playedCols(width, s[1], f.duration_sec) }
+    const sel: ?waveform.SelRange = if (cutSpan(f.mark_in, f.mark_out, f.duration_sec)) |span|
+        .{ .start_col = playedCols(width, span[0], f.duration_sec), .end_col = playedCols(width, span[1], f.duration_sec) }
     else
         null;
-    // The two anchors, drawn as full-height lines at the marked positions
-    // — the region's start and end cursors. A lone mark resolves against
-    // the recording's edges, like the cut itself does.
-    const edges: ?waveform.SelRange = if (f.mark_in == null and f.mark_out == null)
-        null
-    else
-        .{
-            .start_col = playedCols(width, f.mark_in orelse 0, f.duration_sec),
-            .end_col = playedCols(width, f.mark_out orelse f.duration_sec, f.duration_sec),
-        };
-
-    frame.clearRetainingCapacity();
-    const put = struct {
-        fn append(fr: *std.ArrayList(u8), al: std.mem.Allocator, s: []const u8) void {
-            fr.appendSlice(al, s) catch {};
-        }
-    }.append;
-
-    put(frame, gpa, live.sync_begin);
-    if (width != view.width or height != view.height) {
-        put(frame, gpa, live.clearScreen(&esc));
-        view.width = width;
-        view.height = height;
-    }
-    put(frame, gpa, live.moveTo(&esc, 1, 1));
-    put(frame, gpa, live.clearLine(&esc));
-    put(frame, gpa, statusLine(&line, f.state, f.elapsed_sec, f.duration_sec, f.mark_in, f.mark_out, f.color));
-
-    var row: usize = 0;
-    while (row < height) : (row += 1) {
-        put(frame, gpa, live.moveTo(&esc, 2 + row, 1));
-        put(frame, gpa, live.clearLine(&esc));
-        put(frame, gpa, waveform.renderRow(cols, height, row, .{
-            .played_cols = cursor,
-            .cursor_col = cursor,
+    for (0..height) |row| {
+        appendRow(frame, gpa, waveform.renderRow(cols, height, row, .{
+            .played_cols = width,
+            .cursor_col = @min(playedCols(width, f.elapsed_sec, f.duration_sec), width -| 1),
             .sel = sel,
-            .sel_edges = edges,
+            .sel_edges = sel,
             .color = f.color,
         }, &line));
     }
+    const axis = ruler.Axis{ .origin_ms = 0, .ms_per_col = @max(f.duration_sec, 0.001) * 1000.0 / @as(f64, @floatFromInt(@max(width, 1))) };
+    appendRow(frame, gpa, ruler.renderTicks(&line, width, axis));
+    appendRow(frame, gpa, ruler.renderLabels(&line, width, axis));
+    appendRow(frame, gpa, f.note orelse "I/O mark · DEL cut · ENTER confirm · R reset · C/L/G share");
+}
 
-    // The ruler spans the whole recording under the grid.
-    const axis = ruler.Axis{
-        .origin_ms = 0,
-        .ms_per_col = @max(f.duration_sec, 0.001) * 1000.0 / @as(f64, @floatFromInt(@max(width, 1))),
-    };
-    put(frame, gpa, live.moveTo(&esc, 2 + height, 1));
-    put(frame, gpa, live.clearLine(&esc));
-    if (f.color) put(frame, gpa, style.dim);
-    put(frame, gpa, ruler.renderTicks(&line, width, axis));
-    put(frame, gpa, live.moveTo(&esc, 3 + height, 1));
-    put(frame, gpa, live.clearLine(&esc));
-    put(frame, gpa, ruler.renderLabels(&line, width, axis));
-    if (f.color) put(frame, gpa, style.reset);
-
-    // The notes row: the pending-delete prompt or a transient notice.
-    put(frame, gpa, live.moveTo(&esc, 4 + height, 1));
-    put(frame, gpa, live.clearLine(&esc));
-    if (f.note) |msg| {
-        var styled: [192]u8 = undefined;
-        var n: usize = 0;
-        style.appendStyled(&styled, &n, f.color, style.yellow, msg);
-        put(frame, gpa, styled[0..n]);
-    }
-
-    // The key legend, one dim row under everything.
-    put(frame, gpa, live.moveTo(&esc, 5 + height, 1));
-    put(frame, gpa, live.clearLine(&esc));
-    put(frame, gpa, hintsLine(&line, has_marks, f.state == .paused, f.color));
-
-    put(frame, gpa, live.sync_end);
-    printStderr(io, frame.items);
+fn appendRow(frame: *std.ArrayList(u8), gpa: std.mem.Allocator, text: []const u8) void {
+    frame.appendSlice(gpa, text) catch {};
+    frame.append(gpa, '\n') catch {};
 }
 
 /// "delete 00:05–00:12? ENTER deletes, anything else cancels" — the note
@@ -517,6 +493,20 @@ fn mapPosition(pos: f64, span: [2]f64) f64 {
     if (pos < span[0]) return pos;
     if (pos < span[1]) return span[0];
     return pos - (span[1] - span[0]);
+}
+
+const ReplayAfterCut = struct {
+    sec: f64,
+    pause: bool,
+};
+
+/// A tail cut can place the old playhead exactly at the new EOF. Park one
+/// frame before that edge and pause so the shortened player remains visible.
+fn replayAfterCut(pos: f64, span: [2]f64, duration_sec: f64, sample_rate: u32) ReplayAfterCut {
+    const mapped = mapPosition(pos, span);
+    if (mapped < duration_sec) return .{ .sec = mapped, .pause = false };
+    const frame_sec = 1.0 / @as(f64, @floatFromInt(@max(sample_rate, 1)));
+    return .{ .sec = @max(duration_sec - frame_sec, 0), .pause = true };
 }
 
 /// How many columns of the grid the playback has covered.
@@ -564,21 +554,6 @@ fn statusLine(buf: []u8, state: PlayState, elapsed_sec: f64, duration_sec: f64, 
     return buf[0..n];
 }
 
-/// The dim key legend under the grid. With marks set, the I/O hints give
-/// way to R=reset; SPACE names what the next press does.
-fn hintsLine(buf: []u8, has_marks: bool, paused: bool, color: bool) []const u8 {
-    var n: usize = 0;
-    style.begin(buf, &n, color, style.dim);
-    appendStr(buf, &n, if (paused) "SPACE=play " else "SPACE=pause ");
-    if (has_marks) {
-        appendStr(buf, &n, "←→=1s SHIFT+←→=5s DEL=delete R=reset T=transcribe Q=stop");
-    } else {
-        appendStr(buf, &n, "←→=1s SHIFT+←→=5s I=in O=out DEL=delete T=transcribe Q=stop");
-    }
-    style.end(buf, &n, color);
-    return buf[0..n];
-}
-
 /// "MM:SS", or "H:MM:SS" past an hour; negative values clamp to zero.
 /// Returns the number of display columns written.
 fn appendTime(buf: []u8, n: *usize, sec: f64) usize {
@@ -600,20 +575,12 @@ fn appendTime(buf: []u8, n: *usize, sec: f64) usize {
     return if (h > 0) 8 else 5;
 }
 
-/// Prints the sibling transcript (`<stem>.md`) in full — frontmatter off,
-/// prose verbatim — above the player. No file or empty body: silent.
-fn printTranscript(io: std.Io, gpa: std.mem.Allocator, recordings_path: []const u8, name: []const u8) void {
+/// Loads the sibling transcript (`<stem>.md`) when present. The caller owns
+/// the returned bytes and keeps them alive for the whole player session.
+fn loadTranscript(io: std.Io, gpa: std.mem.Allocator, recordings_path: []const u8, name: []const u8) ?[]u8 {
     var md_path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const md_path = transcriptPath(recordings_path, name, &md_path_buf) orelse return;
-
-    const doc = std.Io.Dir.cwd().readFileAlloc(io, md_path, gpa, .limited(16 * 1024 * 1024)) catch return;
-    defer gpa.free(doc);
-
-    const parts = prompts.splitFrontmatter(doc);
-    if (parts.body.len == 0) return;
-    printStderr(io, parts.body);
-    if (parts.body[parts.body.len - 1] != '\n') printStderr(io, "\n");
-    printStderr(io, "\n");
+    const md_path = transcriptPath(recordings_path, name, &md_path_buf) orelse return null;
+    return std.Io.Dir.cwd().readFileAlloc(io, md_path, gpa, .limited(markdown.max_document_bytes)) catch null;
 }
 
 /// The sibling transcript path (`<stem>.md`), or null when the name does
@@ -626,41 +593,17 @@ fn transcriptPath(recordings_path: []const u8, name: []const u8, buf: []u8) ?[]c
     return library.recordingPath(recordings_path, md_name_buf[0..md_len], buf);
 }
 
-/// The `T` handler: a transcript on disk opens in $EDITOR (vi as the
-/// fallback); none, and the recording is transcribed first — the same
-/// `rec transcribe` the user would type. Returns the exit code.
+/// The `T` handler: a transcript on disk opens in the Markdown viewer; none,
+/// and the recording is transcribed first — the same `rec transcribe` the
+/// user would type. Returns the exit code.
 fn openTranscript(io: std.Io, gpa: std.mem.Allocator, name: []const u8, recordings_path: []const u8) u8 {
     var md_path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     if (transcriptPath(recordings_path, name, &md_path_buf)) |md_path| {
         if (std.Io.Dir.cwd().statFile(io, md_path, .{})) |_| {
-            return openInEditor(io, md_path);
+            return markdown.showFile(io, gpa, md_path);
         } else |_| {}
     }
     return transcribeNow(io, gpa, name, recordings_path);
-}
-
-/// Opens `path` in the user's $EDITOR, handing the terminal over; returns
-/// the editor's exit code.
-fn openInEditor(io: std.Io, path: []const u8) u8 {
-    const editor = llm.envValue("EDITOR") orelse "vi";
-    var argv = [_][]const u8{ editor, path };
-    var child = std.process.spawn(io, .{
-        .argv = &argv,
-        .stdin = .inherit,
-        .stdout = .inherit,
-        .stderr = .inherit,
-    }) catch {
-        printStderr(io, "play: cannot run the editor\n");
-        return 1;
-    };
-    const term = child.wait(io) catch {
-        printStderr(io, "play: editor failed\n");
-        return 1;
-    };
-    return switch (term) {
-        .exited => |code| @truncate(code),
-        else => 1,
-    };
 }
 
 /// Runs the transcribe command for this recording. The selection must be a
@@ -730,28 +673,6 @@ test "statusLine shows state, times, and the marked span" {
     );
 }
 
-test "hintsLine lists the keys; R=reset only once marks exist" {
-    var buf: [512]u8 = undefined;
-    try std.testing.expectEqualStrings(
-        "SPACE=pause ←→=1s SHIFT+←→=5s I=in O=out DEL=delete T=transcribe Q=stop",
-        hintsLine(&buf, false, false, false),
-    );
-    try std.testing.expectEqualStrings(
-        "SPACE=pause ←→=1s SHIFT+←→=5s DEL=delete R=reset T=transcribe Q=stop",
-        hintsLine(&buf, true, false, false),
-    );
-    // While paused, SPACE names what it resumes.
-    try std.testing.expectEqualStrings(
-        "SPACE=play ←→=1s SHIFT+←→=5s DEL=delete R=reset T=transcribe Q=stop",
-        hintsLine(&buf, true, true, false),
-    );
-    // Dimmed on a color terminal.
-    try std.testing.expectEqualStrings(
-        "\x1b[2mSPACE=pause ←→=1s SHIFT+←→=5s I=in O=out DEL=delete T=transcribe Q=stop\x1b[0m",
-        hintsLine(&buf, false, false, true),
-    );
-}
-
 test "confirmNote spells out the region and the keys" {
     var buf: [128]u8 = undefined;
     try std.testing.expectEqualStrings(
@@ -773,6 +694,12 @@ test "mapPosition carries the playhead through the cut" {
     try std.testing.expectApproxEqAbs(@as(f64, 5), mapPosition(7, span), 1e-9);
     // Past it: shifts back by the removed length.
     try std.testing.expectApproxEqAbs(@as(f64, 15), mapPosition(20, span), 1e-9);
+}
+
+test "tail cuts keep the player visible at the shortened end" {
+    const replay = replayAfterCut(1, .{ 1, 3 }, 1, 48000);
+    try std.testing.expect(replay.pause);
+    try std.testing.expectApproxEqAbs(@as(f64, 1) - 1.0 / 48000.0, replay.sec, 1e-9);
 }
 
 test "statusLine colors state, times, and marks" {

@@ -48,3 +48,13 @@ jobs:
         with:
           name: ${{ matrix.artifact }}
           path: zig-out/bin/
+
+  viewer:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: "0.16.0"
+      - run: zig build -Dsilent-input=true
+      - run: python3 scripts/e2e_viewer.py

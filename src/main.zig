@@ -2,8 +2,10 @@ const std = @import("std");
 const formatcmd = @import("formatcmd.zig");
 const library = @import("library.zig");
 const llm = @import("llm.zig");
+const markdown = @import("markdown.zig");
 const playback = @import("playback.zig");
 const record = @import("record.zig");
+const share = @import("sharecmd.zig");
 const setupcmd = @import("setupcmd.zig");
 const transcribecmd = @import("transcribecmd.zig");
 const updater = @import("update.zig");
@@ -23,6 +25,9 @@ const usage =
     \\  format [index|path] [--template name] [--out path] [--context text]
     \\                             Restructure a transcript with a prompt template
     \\                             (default: meeting, on the latest recording)
+    \\  share [index|path] [--to clipboard|chatgpt|claude|gemini]
+    \\                             Copy or open a transcript in another app
+    \\  view <path.md>             Read a Markdown document with scrolling
     \\  setup                      Choose which coding-agent LLM processes transcripts
     \\                             (alias: configure-llm)
     \\  about                      Show the project page and how to contribute
@@ -86,6 +91,14 @@ pub fn main(init: std.process.Init) u8 {
         return 0;
     }
 
+    if (std.mem.eql(u8, cmd, "view")) {
+        if (rest.len != 1) {
+            printStderr(io, "Usage: rec view <path.md>\n");
+            return 1;
+        }
+        return markdown.showFile(io, init.gpa, rest[0]);
+    }
+
     // Silent self-update check: once a day, never during a recording or when
     // `update` itself is running, and mute on every failure path.
     if (!std.mem.eql(u8, cmd, "record") and !std.mem.eql(u8, cmd, "update")) {
@@ -97,13 +110,25 @@ pub fn main(init: std.process.Init) u8 {
 
     if (std.mem.eql(u8, cmd, "record")) {
         const ra = parseRecordArgs(rest);
+        // A terminal output is enough to open the follow-up player. stdin
+        // may be a scripted pipe (for example a pty test feeding ESC then Q)
+        // while the recorder still owns a visible terminal.
+        const auto_play = std.Io.File.stderr().isTty(io) catch false;
         switch (ra) {
             .invalid => {
                 printStderr(io, usage);
                 return 1;
             },
-            .default => return record.recordOnce(io, init.gpa, null, recordings_path),
-            .duration => |sec| return record.recordOnce(io, init.gpa, sec, recordings_path),
+            .default => {
+                const code = record.recordOnce(io, init.gpa, null, recordings_path);
+                if (code == 0 and auto_play and record.last_stop_was_interrupt) return playback.playSelection(io, init.gpa, library.latest_selection, recordings_path);
+                return code;
+            },
+            .duration => |sec| {
+                const code = record.recordOnce(io, init.gpa, sec, recordings_path);
+                if (code == 0 and auto_play and record.last_stop_was_interrupt) return playback.playSelection(io, init.gpa, library.latest_selection, recordings_path);
+                return code;
+            },
         }
     }
 
@@ -144,6 +169,10 @@ pub fn main(init: std.process.Init) u8 {
 
     if (std.mem.eql(u8, cmd, "format")) {
         return formatcmd.run(io, init.gpa, rest, home_dir, recordings_path);
+    }
+
+    if (std.mem.eql(u8, cmd, "share")) {
+        return share.run(io, init.gpa, rest, recordings_path);
     }
 
     // The LLM choice lives behind two names: `setup` for first-run configure,
@@ -270,6 +299,8 @@ test {
     _ = @import("prompts.zig");
     _ = @import("ruler.zig");
     _ = @import("setupcmd.zig");
+    _ = @import("share.zig");
+    _ = @import("sharecmd.zig");
     _ = @import("style.zig");
     _ = @import("transcribecmd.zig");
     _ = @import("update.zig");
@@ -277,5 +308,7 @@ test {
     _ = @import("waveform.zig");
     _ = @import("cut.zig");
     _ = @import("keys.zig");
+    _ = @import("markdown.zig");
+    _ = @import("viewport.zig");
     _ = @import("wav.zig");
 }

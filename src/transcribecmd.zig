@@ -1,6 +1,7 @@
 const std = @import("std");
 const library = @import("library.zig");
 const llm = @import("llm.zig");
+const markdown = @import("markdown.zig");
 const okf = @import("okf.zig");
 const prompts = @import("prompts.zig");
 const record = @import("record.zig");
@@ -247,8 +248,10 @@ pub fn run(
 
     // Refinement never trades away the artifact: on any failure the raw
     // transcript stays exactly as saved and the command still exits 0.
-    if (ta.no_refine) return 0;
-    refineTranscript(io, gpa, home_dir, doc, ta.context, out_path);
+    if (!ta.no_refine) refineTranscript(io, gpa, home_dir, doc, ta.context, out_path);
+    // The saved artifact is immediately opened in the same Markdown viewer
+    // used by playback and `format`; pipes receive a non-interactive render.
+    _ = markdown.showFile(io, gpa, out_path);
     return 0;
 }
 

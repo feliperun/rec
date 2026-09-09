@@ -44,6 +44,9 @@ Sua tarefa é revisar o texto para restaurar a coerência semântica e a fidelid
 ### GESTÃO DE MÚLTIPLOS FALANTES
 
 - Mantenha os rótulos de falantes (ex: `[Falante 1]`, `[Maria]`) inalterados.
+- Preserve exatamente cada prefixo de tempo e speaker no formato
+  `[HH:MM:SS–HH:MM:SS] Speaker N:`; corrija somente o texto depois dos dois
+  pontos.
 - Se uma frase estiver quebrada entre dois turnos de fala (erro de diarização), ajuste a pontuação para restaurar o fluxo lógico, mas evite mover texto entre falantes a menos que o erro seja flagrante.
 
 ### SANITIZAÇÃO

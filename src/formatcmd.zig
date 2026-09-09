@@ -1,6 +1,7 @@
 const std = @import("std");
 const library = @import("library.zig");
 const llm = @import("llm.zig");
+const markdown = @import("markdown.zig");
 const prompts = @import("prompts.zig");
 
 /// Name picked when the user passes no --template: the bundled meeting
@@ -244,6 +245,7 @@ pub fn run(
     printErr(io, "Documento salvo em ");
     printErr(io, out_path);
     printErr(io, "\n");
+    _ = markdown.showFile(io, gpa, out_path);
     return 0;
 }
 

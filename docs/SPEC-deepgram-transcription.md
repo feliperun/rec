@@ -91,9 +91,9 @@ language: pt-BR
 duration_sec: 12.5
 ---
 
-Bom dia.
+[00:00:00–00:00:02] Speaker 0: Bom dia.
 
-Tudo bem?
+[00:00:02–00:00:05] Speaker 1: Tudo bem?
 ```
 
 Rules:
@@ -102,9 +102,9 @@ Rules:
   `Z`.
 - `duration_sec` comes from the WAV header via `library`'s duration parse;
   omitted when unreadable.
-- The body is prose only, no headings, tables, or timestamps: one paragraph
-  per speaker turn from diarization — consecutive utterances of a speaker
-  join with a single space; any speaker change starts a new paragraph.
+- The body keeps one timestamp range and speaker label per diarized utterance:
+  `[HH:MM:SS–HH:MM:SS] Speaker N: text`. Timestamps are retained so the
+  `format` prompt can use exact spoken intervals.
 - Transcript text is verbatim (no escaping); exactly one trailing newline
   at EOF.
 - YAML strings are emitted plain, quoted only if they contain `:` followed
@@ -131,9 +131,9 @@ All in `zig build test`, no network:
 2. **Response parsing** — fixture JSON (captured Deepgram shape) yields
    ordered utterance list (start, text, speaker); missing/malformed fields
    produce the specified errors.
-3. **OKF rendering** — full document golden test (frontmatter order, one
-   paragraph per speaker turn, same-speaker merge); duration omitted when
-   null; transcript text kept verbatim.
+3. **OKF rendering** — full document golden test (frontmatter order,
+   timestamped speaker turns); duration omitted when null; transcript text kept
+   verbatim.
 4. **Arg parsing** — `--language`/`--out` combinations, unknown flag rejection
    (usage + exit 1).
 5. **Regression** — existing suites stay green; `play` selection behavior
