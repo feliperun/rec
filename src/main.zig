@@ -297,6 +297,7 @@ test {
     _ = @import("llm.zig");
     _ = @import("playback.zig");
     _ = @import("player.zig");
+    _ = @import("spectrum_test.zig");
     _ = @import("prompts.zig");
     _ = @import("ruler.zig");
     _ = @import("setupcmd.zig");

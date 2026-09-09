@@ -44,6 +44,8 @@ def run():
         try:
             session.until(lambda: session.contains('TRANSCRIPT_MARKER'))
             session.key(b' ')
+            session.key(b'z')
+            session.until(lambda: session.contains('FOCUS'))
             session.key(b'f')
             session.until(lambda: session.contains('FORMATTED_MARKER'))
             assert session.contains('00:08'), 'tab switch hid the audio'

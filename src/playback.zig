@@ -6,7 +6,8 @@ const audio_notes = @import("audio_notes.zig");
 const live = @import("live.zig");
 const markdown = @import("markdown.zig");
 const player_mod = @import("player.zig");
-const ruler = @import("ruler.zig");
+const deck = @import("deck.zig");
+const spectrum = @import("spectrum.zig");
 const style = @import("style.zig");
 const viewport = @import("viewport.zig");
 const waveform = @import("waveform.zig");
@@ -150,7 +151,7 @@ fn playBlocking(io: std.Io, pcm: []const u8, sample_rate: u32, channels: u32) u8
 
 /// How often the view redraws, in ms — fast enough to feel live, slow enough
 /// to keep the terminal quiet.
-const tick_ms = 100;
+const tick_ms = 33;
 
 /// Seek steps: the arrows move the playhead by one second, SHIFT+arrows by
 /// five.
@@ -235,6 +236,10 @@ fn playInteractive(
     var screen = viewport.Screen{};
     defer screen.deinit(gpa);
     var scroll: usize = 0;
+    var settings = deck.Settings{};
+    var analysis = spectrum.Analysis{};
+    var redraw = true;
+    var last_size = waveform.TermSize{ .rows = 0, .cols = 0 };
     printStderr(io, viewport.mouse_on);
     defer printStderr(io, viewport.mouse_off);
 
@@ -254,7 +259,9 @@ fn playInteractive(
     var note: ?[]const u8 = null;
 
     keys: while (true) {
+        const tick_started = std.Io.Timestamp.now(io, .awake);
         if (p.isDone()) {
+            redraw = redraw or state != .paused;
             state = .paused;
             p.setPaused(true);
         }
@@ -263,30 +270,46 @@ fn playInteractive(
             break :keys;
         }
 
-        if (notes.poll(io, gpa)) document.width = 0;
+        if (notes.poll(io, gpa)) {
+            document.width = 0;
+            redraw = true;
+        }
         const size = waveform.termSize();
-        if (document.width != size.cols) document.set(gpa, notes.text(), size.cols) catch return 1;
-        const height = @min(@as(usize, 8), waveform.viewHeight(size.rows / 3));
-        drawHeader(gpa, &frame, .{
-            .state = state,
-            .elapsed_sec = p.positionSec(),
-            .duration_sec = duration_sec,
-            .blocks = block_view.items,
-            .mark_in = mark_in,
-            .mark_out = mark_out,
-            .note = note orelse notes.status(),
-            .color = color,
-        }, @min(size.cols, waveform.max_columns), height);
-        frame.appendSlice(gpa, notes.tabs()) catch return 1;
-        frame.append(gpa, '\n') catch return 1;
-        header.set(gpa, frame.items, size.cols) catch return 1;
-        var footer_buf: [192]u8 = undefined;
-        const footer = std.fmt.bufPrint(&footer_buf, "Q quit · {s} · {s}", .{ notes.tabs(), notes.status() orelse "↑↓ scroll · Y copy · S share" }) catch "Q quit";
-        screen.paint(io, gpa, &header, &document, &scroll, size.rows, size.cols, footer) catch return 1;
+        const resized = size.cols != last_size.cols or size.rows != last_size.rows;
+        const visible_audio = scroll < @max(header.starts.items.len, 1);
+        if (redraw or resized or (state == .playing and visible_audio)) {
+            redraw = false;
+            last_size = size;
+            if (document.width != size.cols) document.set(gpa, notes.text(), size.cols) catch return 1;
+            const position = p.pos.load(.acquire);
+            const elapsed = @as(f64, @floatFromInt(position)) / @as(f64, @floatFromInt(audio.sample_rate));
+            if (scroll < @max(header.starts.items.len, 1) and !settings.help) analysis.update(audio.pcm, audio.sample_rate, audio.channels, @intCast(position));
+            var status_buf: [512]u8 = undefined;
+            deck.draw(gpa, &frame, .{
+                .name = name,
+                .status = statusLine(&status_buf, state, elapsed, duration_sec, mark_in, mark_out, color),
+                .paused = state == .paused,
+                .elapsed = elapsed,
+                .duration = duration_sec,
+                .sample_rate = audio.sample_rate,
+                .channels = audio.channels,
+                .blocks = block_view.items,
+                .selection = cutSpan(mark_in, mark_out, duration_sec),
+                .note = note orelse notes.status(),
+                .color = color,
+                .tabs = notes.tabs(),
+                .analysis = &analysis,
+                .settings = settings,
+            }, size.cols, size.rows) catch return 1;
+            header.set(gpa, frame.items, size.cols) catch return 1;
+            screen.paint(io, gpa, &header, &document, &scroll, size.rows, size.cols, deck.footer(size.cols, color)) catch return 1;
+        }
 
-        const key = keys.readKey(io, tick_ms);
+        const spent_ms = @divTrunc(std.Io.Timestamp.now(io, .awake).nanoseconds - tick_started.nanoseconds, std.time.ns_per_ms);
+        const key = keys.readKey(io, @intCast(@max(tick_ms - spent_ms, 1)));
         if (key == .none) continue :keys; // no key: the notice stays up
         note = null;
+        redraw = true;
 
         // A pending delete resolves on the very next key: ENTER cuts,
         // anything else — a second DELETE, the arrows, SPACE — cancels.
@@ -299,8 +322,8 @@ fn playInteractive(
                 // the cut, the new file replaces the old, and the view
                 // stays up — the note plus the shrunken waveform report it.
                 const pos = p.positionSec();
-                cut.cutIntervalFile(io, gpa, abs_path, span[0], span[1]) catch |err| {
-                    note = std.fmt.bufPrint(&note_buf, "cut failed ({s}); still playing", .{@errorName(err)}) catch "cut failed; still playing";
+                cut.cutIntervalFile(io, gpa, abs_path, span[0], span[1]) catch {
+                    note = "Could not cut this recording; still playing";
                     continue :keys; // the recording is untouched
                 };
                 p.stop();
@@ -312,6 +335,7 @@ fn playInteractive(
                     exit_code = 1;
                     break :keys;
                 };
+                analysis = .{};
                 tracker.deinit();
                 tracker = waveform.Tracker.init(gpa, waveform.peakBlockBytes(audio.byteRate()));
                 tracker.feed(audio.pcm);
@@ -323,6 +347,7 @@ fn playInteractive(
                     exit_code = 1;
                     break :keys;
                 };
+                _ = player_mod.ma.ma_device_set_master_volume(&p.device, settings.gain());
                 const replay = replayAfterCut(pos, span, duration_sec, audio.sample_rate);
                 p.seekSec(replay.sec);
                 if (replay.pause or state == .paused) {
@@ -341,6 +366,15 @@ fn playInteractive(
             continue :keys;
         }
 
+        if (key == .byte and settings.key(key.byte)) {
+            scroll = 0;
+            _ = player_mod.ma.ma_device_set_master_volume(&p.device, settings.gain());
+            continue;
+        }
+        if (key == .byte and key.byte >= '0' and key.byte <= '9') {
+            p.seekSec(duration_sec * @as(f64, @floatFromInt(key.byte - '0')) / 10);
+            continue;
+        }
         if (viewport.navigate(&scroll, key, header.starts.items.len + document.starts.items.len, size.rows -| 1)) continue;
         switch (key) {
             .eof => break :keys,
@@ -370,6 +404,8 @@ fn playInteractive(
                     };
                     if (c == '\t') notes.active = tab else notes.select(io, tab);
                     document.width = 0;
+                    settings.focus = false;
+                    settings.help = false;
                     scroll = 0;
                 },
                 'j' => {
@@ -422,48 +458,6 @@ fn playInteractive(
 
 // --- the live view -----------------------------------------------------------
 
-const Frame = struct {
-    state: PlayState,
-    elapsed_sec: f64,
-    duration_sec: f64,
-    blocks: []const waveform.Block,
-    mark_in: ?f64,
-    mark_out: ?f64,
-    note: ?[]const u8,
-    color: bool,
-};
-
-/// Audio rows precede the transcript in a single scrollable document.
-fn drawHeader(gpa: std.mem.Allocator, frame: *std.ArrayList(u8), f: Frame, width: usize, height: usize) void {
-    frame.clearRetainingCapacity();
-    var line: [waveform.rowBufferLen(waveform.max_columns)]u8 = undefined;
-    appendRow(frame, gpa, statusLine(&line, f.state, f.elapsed_sec, f.duration_sec, f.mark_in, f.mark_out, f.color));
-    var columns: [waveform.max_columns]waveform.Column = undefined;
-    const cols = waveform.layoutColumns(f.blocks, columns[0..width], .fit);
-    const sel: ?waveform.SelRange = if (cutSpan(f.mark_in, f.mark_out, f.duration_sec)) |span|
-        .{ .start_col = playedCols(width, span[0], f.duration_sec), .end_col = playedCols(width, span[1], f.duration_sec) }
-    else
-        null;
-    for (0..height) |row| {
-        appendRow(frame, gpa, waveform.renderRow(cols, height, row, .{
-            .played_cols = width,
-            .cursor_col = @min(playedCols(width, f.elapsed_sec, f.duration_sec), width -| 1),
-            .sel = sel,
-            .sel_edges = sel,
-            .color = f.color,
-        }, &line));
-    }
-    const axis = ruler.Axis{ .origin_ms = 0, .ms_per_col = @max(f.duration_sec, 0.001) * 1000.0 / @as(f64, @floatFromInt(@max(width, 1))) };
-    appendRow(frame, gpa, ruler.renderTicks(&line, width, axis));
-    appendRow(frame, gpa, ruler.renderLabels(&line, width, axis));
-    appendRow(frame, gpa, f.note orelse "SPACE play · ←→ seek · I/O mark · DEL cut · R reset · C/L/G share");
-}
-
-fn appendRow(frame: *std.ArrayList(u8), gpa: std.mem.Allocator, text: []const u8) void {
-    frame.appendSlice(gpa, text) catch {};
-    frame.append(gpa, '\n') catch {};
-}
-
 /// "delete 00:05–00:12? ENTER deletes, anything else cancels" — the note
 /// shown while a DELETE is pending confirmation.
 fn confirmNote(buf: []u8, span: [2]f64) []const u8 {
@@ -511,13 +505,7 @@ fn replayAfterCut(pos: f64, span: [2]f64, duration_sec: f64, sample_rate: u32) R
 }
 
 /// How many columns of the grid the playback has covered.
-fn playedCols(width: usize, elapsed_sec: f64, duration_sec: f64) usize {
-    if (duration_sec <= 0) return 0;
-    const frac = @min(@max(elapsed_sec / duration_sec, 0.0), 1.0);
-    const cols = frac * @as(f64, @floatFromInt(width));
-    if (cols >= @as(f64, @floatFromInt(width))) return width;
-    return @intFromFloat(cols);
-}
+const playedCols = deck.playedCols;
 
 /// The interval the marks describe, normalized: the earlier mark is the
 /// start. Only O cuts the head [0..O], only I the tail [I..end], both the

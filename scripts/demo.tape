@@ -1,62 +1,34 @@
-# Regenerates docs/demo.gif — the README demo. Run from the repo root:
-#   vhs scripts/demo.tape
-# The fixtures are synthetic ffmpeg tones in a scratch $HOME (/tmp/rec-demo);
-# nothing of yours is recorded or shown. `rec record` needs the microphone:
-# scripts/demo_record.sh plays the short fixture over the speakers while it
-# captures.
+# Synthetic visual demo. From the repo root:
+# zig build -Doptimize=ReleaseSafe -Dsilent-input=true --prefix .runs/preview-out
+# python3 scripts/demo_player.py --prepare .runs/demo-home
+# vhs scripts/demo.tape
+# ffmpeg -y -ss 2 -i .runs/demo.mp4 -frames:v 1 docs/player.png
 Output docs/demo.gif
-
-Set Shell zsh
-Set FontSize 21
-Set Width 1150
-Set Height 660
-Set Theme "Dracula"
-Set Padding 42
+Output .runs/demo.mp4
+Set Shell bash
+Set FontFamily "Menlo"
+Set FontSize 18
+Set Width 1200
+Set Height 780
+Set Padding 20
+Set Framerate 15
+Set Theme {"background":"#080808","foreground":"#c5c7d2","black":"#080808","brightBlack":"#606578","green":"#87ffd7","yellow":"#ffd787","cyan":"#87d7ff","white":"#c5c7d2","brightWhite":"#ffffff"}
 Set CursorBlink false
-Set PlaybackSpeed 1.2
-Set TypingSpeed 60ms
-
 Hide
-Type 'export PS1="$ " PROMPT="$ " PATH=$PWD/zig-out/bin:$PATH && export HOME=/tmp/rec-demo && rm -rf /tmp/rec-demo && mkdir -p $HOME/recordings && ffmpeg -hide_banner -loglevel error -f lavfi -i "aevalsrc=0.55*sin(2*PI*180*t)*(0.5+0.5*sin(2*PI*0.7*t))+0.22*sin(2*PI*1150*t)*(0.5+0.5*sin(2*PI*1.9*t)):s=48000:d=6" -ar 48000 -ac 1 -c:a aac -b:a 96k -f mp4 $HOME/recordings/20260904-093001.m4a && ffmpeg -hide_banner -loglevel error -f lavfi -i "aevalsrc=0.55*sin(2*PI*180*t)*(0.5+0.5*sin(2*PI*0.7*t))+0.22*sin(2*PI*1150*t)*(0.5+0.5*sin(2*PI*1.9*t)):s=48000:d=12" -ar 48000 -ac 1 -c:a aac -b:a 96k -f mp4 $HOME/recordings/20260904-090115.m4a && printf "%s\n" "---" "duration: 12.0" "language: en-US" "---" "Speaker 1: Welcome to rec, a terminal meeting recorder." "Speaker 2: Play it back, cut the noise out, transcribe in one key." > $HOME/recordings/20260904-090115.md && clear' Enter
-Sleep 1.5s
-Show
-
-# Record: the short fixture plays over the speakers while the mic captures.
-Type "bash scripts/demo_record.sh" Enter
-Sleep 6.4s
-
-# The new recording is in the library.
-Type "rec list" Enter
-Sleep 1.6s
-
-# Play the long fixture by name: transcript first, then the live view.
-Type "rec play 20260904-090115.m4a" Enter
-Sleep 2.8s
-Type " "
-Sleep 0.9s
-Left
-Left
-Sleep 0.7s
-Right
-Right
-Right
-Right
-Sleep 0.7s
-Type "i"
-Sleep 0.6s
-Right
-Right
-Type "o"
-Sleep 1.2s
-Type " "
-Sleep 0.9s
-Delete
-Sleep 1.2s
+Type 'env -u NO_COLOR HOME="$PWD/.runs/demo-home" XDG_CONFIG_HOME="$PWD/.runs/demo-home/.config" .runs/preview-out/bin/rec play "Northern Lights.wav"'
 Enter
-Sleep 2s
+Sleep 3s
+Show
+Sleep 3s
+Type "z"
+Sleep 3s
+Type "v"
+Sleep 3s
+Type "v"
+Sleep 3s
+Type "f"
+Sleep 3s
+Type "t"
+Sleep 3s
+Hide
 Type "q"
-Sleep 1.3s
-
-# The cut shows in the library.
-Type "rec list" Enter
-Sleep 2s
