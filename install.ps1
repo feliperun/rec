@@ -39,4 +39,12 @@ if (($env:PATH -split ";") -notcontains $installDir) {
 }
 
 Write-Host "Installed rec to $dest"
+
+# Same trap as the POSIX installer: the shell runs the first rec.exe on PATH,
+# so an older copy ahead of $installDir keeps answering after a clean install.
+$found = (Get-Command rec -ErrorAction SilentlyContinue).Source
+if ($found -and $found -ne $dest) {
+    Write-Warning "$found is earlier on your PATH and runs instead of $dest"
+}
+
 & $dest --help

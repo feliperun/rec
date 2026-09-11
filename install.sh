@@ -11,6 +11,7 @@ set -eu
 
 REPO="feliperun/rec"
 INSTALL_DIR="${INSTALL_DIR:-/usr/local/bin}"
+INSTALL_DIR="${INSTALL_DIR%/}"
 BIN_NAME="rec"
 VERSION="${VERSION:-}"
 
@@ -43,7 +44,10 @@ trap 'rm -f "$tmp_bin"' EXIT
 
 echo "Downloading ${download_url}..."
 curl -fsSL -o "$tmp_bin" "$download_url"
-chmod +x "$tmp_bin"
+# mktemp creates the file 0600 and `chmod +x` honours the umask, which leaves
+# the install at 0711: every user but the installing one loses read access to
+# a binary whose whole point is to sit on a shared PATH.
+chmod 755 "$tmp_bin"
 
 if [ ! -d "$INSTALL_DIR" ]; then
   mkdir -p "$INSTALL_DIR" 2>/dev/null || sudo mkdir -p "$INSTALL_DIR"
@@ -57,4 +61,16 @@ else
 fi
 
 echo "Installed ${BIN_NAME} to ${dest}"
+
+# The shell runs the first ${BIN_NAME} on PATH, not the newest one on disk, so
+# an older copy ahead of ${INSTALL_DIR} keeps answering and the install reads
+# as if it did nothing.
+found="$(command -v "$BIN_NAME" 2>/dev/null || true)"
+if [ -z "$found" ]; then
+  echo "note: ${INSTALL_DIR} is not on your PATH; add it to run ${BIN_NAME} by name" >&2
+elif [ "$found" != "$dest" ]; then
+  echo "warning: ${found} is earlier on your PATH and runs instead of ${dest}" >&2
+  echo "         remove it, or put ${INSTALL_DIR} ahead of it" >&2
+fi
+
 "$dest" --help || true
