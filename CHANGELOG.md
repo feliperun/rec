@@ -1,5 +1,15 @@
 # Changelog
 
+## [3.1.1](https://github.com/feliperun/rec/compare/v3.1.0...v3.1.1) (2026-09-11)
+
+
+### Bug Fixes
+
+* **install:** warn when an older rec shadows the new one on PATH ([9076257](https://github.com/feliperun/rec/commit/90762579c7155db8b21973039d3ac0e3dc6f263c))
+* **install:** warn when an older rec shadows the new one on PATH ([c76553f](https://github.com/feliperun/rec/commit/c76553fc7fd1afb3de66f11aa03e3327926745dd))
+* link Linux releases against glibc so capture works ([62ed71b](https://github.com/feliperun/rec/commit/62ed71b04f17a8668cecdafd601e2f2fe99e918a))
+* link Linux releases against glibc so capture works ([1d56d3e](https://github.com/feliperun/rec/commit/1d56d3e73939f299d502e6f07e6297bdcfaddc88))
+
 ## [3.1.0](https://github.com/feliperun/rec/compare/v3.0.0...v3.1.0) (2026-09-09)
 
 
