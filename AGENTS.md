@@ -152,6 +152,17 @@ file — keep appending.
   fractional-width spectrum bars exercise this in `src/spectrum_test.zig` and
   `src/visualizer.zig`.
 
+- **A static Linux binary records silence, and nothing else complains.**
+  miniaudio opens ALSA/PulseAudio/JACK with `dlopen`, which musl cannot do in a
+  static build, so every backend fails to load and miniaudio substitutes its
+  null device — a valid file of the right duration, full of zeros. A bare
+  `-Dtarget=x86_64-linux` resolves to musl, which is how v3.1.0 shipped mute.
+  Linux targets name `-gnu` with a pinned floor in both
+  `.github/workflows/release.yml` and `ci.yml`, and the `dynamic` linkage gate
+  in each is the regression test: CI runners have no microphone, so no
+  recording test can catch this. The −40 dBFS `LevelTracker` warning only
+  fires after `audibility_min_sec`, so short clips look fine.
+
 - **A DC offset is not audible band energy.** The display's windowed band-pass
   bank must remove each channel's mean before restarting the filters, or every
   window invents a low-frequency transient. Keep the steady-offset regression in
