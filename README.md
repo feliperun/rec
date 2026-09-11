@@ -377,7 +377,9 @@ zig build test     # unit tests: encoder, parsers, prompts, arg parsing
 
 The binary lands at `zig-out/bin/rec`. Any host cross-compiles any target —
 `zig build -Dtarget=x86_64-windows` (or `-Dtarget=x86_64-macos`,
-`aarch64-linux`, …) builds it without a toolchain for that platform. Audio
+`aarch64-linux-gnu`, …) builds it without a toolchain for that platform.
+Name the `gnu` ABI on Linux: a bare `x86_64-linux` resolves to musl and
+links statically, and the resulting binary captures only silence. Audio
 I/O (capture and playback) uses the vendored
 [miniaudio](https://miniaud.io) library; releases are built in `ReleaseFast`
 mode (see `.github/workflows/release.yml`).
@@ -425,6 +427,9 @@ See [`docs/SPEC.md`](docs/SPEC.md) for the functional specification.
 - Supported platforms: macOS Apple Silicon and Intel, Linux x64/arm64
   (recording as WAV), and Windows x64 (WAV). M4A recording stays macOS-only —
   it uses the OS's own AAC codec.
+- Linux releases link glibc 2.28 or newer dynamically. miniaudio opens ALSA
+  and PulseAudio at runtime, which a static binary cannot do, so a musl-only
+  distribution has to build from source against its own audio libraries.
 
 ## License
 
