@@ -1,6 +1,7 @@
 const std = @import("std");
 const m4a = @import("m4a.zig");
 const style = @import("style.zig");
+const viewport = @import("viewport.zig");
 const wav = @import("wav.zig");
 
 pub const recordings_dir = "recordings";
@@ -197,6 +198,16 @@ pub fn stripExt(name: []const u8) []const u8 {
     return name;
 }
 
+/// Longest `list` row this module assembles, in bytes. A row is built in a
+/// staging buffer this size and then copied into the caller's buffer; the
+/// bound here, not NAME_MAX, is what keeps the copy safe.
+const max_row_bytes = 512;
+
+/// Widest name column, leaving room in `max_row_bytes` for the fixed columns
+/// and any styling. A filesystem name longer than this is truncated, so the
+/// row-buffer bound — not the filesystem — is the guarantee.
+const max_name_field = max_row_bytes - 128;
+
 /// `list`: renders the library table, or the empty state. Returns the exit
 /// code (always 0 unless scanning ran out of memory).
 pub fn listRecordings(io: std.Io, gpa: std.mem.Allocator, recordings_path: []const u8) u8 {
@@ -217,8 +228,9 @@ pub fn listRecordings(io: std.Io, gpa: std.mem.Allocator, recordings_path: []con
 
     var name_w: usize = "name".len;
     for (entries.items) |e| name_w = @max(name_w, e.name.len);
+    name_w = @min(name_w, max_name_field);
 
-    var line: [512]u8 = undefined;
+    var line: [max_row_bytes]u8 = undefined;
     const color = style.detect(io, .stdout());
     printStdout(io, appendHeader(&line, name_w, color));
 
@@ -242,25 +254,37 @@ fn appendHeader(buf: []u8, name_w: usize, color: bool) []const u8 {
     return buf[0..n];
 }
 
-/// One `list` row: dim index, name, cyan duration, dim size.
+/// One `list` row: dim index, name, cyan duration, dim size. The name is
+/// filesystem-derived, so it is stripped of control bytes and bounded before
+/// it is copied: the staging buffer and field cap below, not NAME_MAX, are
+/// what keep the row inside the caller's buffer.
 fn appendRow(buf: []u8, name: []const u8, duration: ?f64, size: u64, idx: usize, name_w: usize, color: bool) []const u8 {
+    var name_buf: [std.Io.Dir.max_name_bytes]u8 = undefined;
+    const clean = viewport.stripControls(name, "", &name_buf);
+    const field = @min(name_w, max_name_field);
+    const shown = clean[0..@min(clean.len, field)];
+
+    var row: [max_row_bytes]u8 = undefined;
     var n: usize = 0;
-    style.begin(buf, &n, color, style.dim);
-    appendUintPadded(buf, &n, idx, 3);
-    style.end(buf, &n, color);
-    appendStr(buf, &n, "  ");
-    appendStr(buf, &n, name);
-    appendSpaces(buf, &n, name_w - name.len);
-    appendStr(buf, &n, "  ");
-    style.begin(buf, &n, color, style.cyan);
-    appendDuration(buf, &n, duration);
-    style.end(buf, &n, color);
-    appendStr(buf, &n, "  ");
-    style.begin(buf, &n, color, style.dim);
-    appendSize(buf, &n, size);
-    style.end(buf, &n, color);
-    appendStr(buf, &n, "\n");
-    return buf[0..n];
+    style.begin(&row, &n, color, style.dim);
+    appendUintPadded(&row, &n, idx, 3);
+    style.end(&row, &n, color);
+    appendStr(&row, &n, "  ");
+    appendStr(&row, &n, shown);
+    appendSpaces(&row, &n, field - shown.len);
+    appendStr(&row, &n, "  ");
+    style.begin(&row, &n, color, style.cyan);
+    appendDuration(&row, &n, duration);
+    style.end(&row, &n, color);
+    appendStr(&row, &n, "  ");
+    style.begin(&row, &n, color, style.dim);
+    appendSize(&row, &n, size);
+    style.end(&row, &n, color);
+    appendStr(&row, &n, "\n");
+
+    const copy = @min(n, buf.len);
+    @memcpy(buf[0..copy], row[0..copy]);
+    return buf[0..copy];
 }
 
 /// Duration from the chunk headers found in `data`, a prefix of a WAV file
@@ -503,6 +527,26 @@ test "list table is plain without color and styled with it" {
         "\x1b[2m  1\x1b[0m  20260826-110000.m4a  \x1b[36m01:05\x1b[0m  \x1b[2m187.5 KiB\x1b[0m\n",
         row_c,
     );
+}
+
+test "library row filters control bytes in a filename" {
+    var row_buf: [128]u8 = undefined;
+    const row = appendRow(&row_buf, "evil\x1b]0;pwned\x07.wav", 65.0, 192000, 1, 20, false);
+    try std.testing.expect(std.mem.indexOfScalar(u8, row, 0x1b) == null);
+    try std.testing.expect(std.mem.indexOfScalar(u8, row, 0x07) == null);
+    try std.testing.expect(std.mem.indexOf(u8, row, "evil]0;pwned.wav") != null);
+}
+
+test "library row never overruns its line buffer" {
+    var name: [max_row_bytes * 2]u8 = @splat('a');
+    var line: [max_row_bytes]u8 = undefined;
+    const row = appendRow(&line, &name, 1.0, 1, 1, name.len, true);
+    try std.testing.expect(row.len <= line.len);
+
+    // A caller buffer smaller than the row only receives the leading bytes.
+    var small: [8]u8 = undefined;
+    const clipped = appendRow(&small, &name, 1.0, 1, 1, name.len, false);
+    try std.testing.expect(clipped.len <= small.len);
 }
 
 test "resolveName matches index, exact name, stripped prefix, and misses" {

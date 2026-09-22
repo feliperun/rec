@@ -108,7 +108,12 @@ pub fn show(io: std.Io, gpa: std.mem.Allocator, doc: []const u8) u8 {
     const stderr_tty = std.Io.File.stderr().isTty(io) catch false;
     const tty = stdin_tty and stderr_tty;
     if (!tty) {
-        write(io, rendered);
+        const buf = gpa.alloc(u8, rendered.len) catch {
+            write(io, "Out of memory\n");
+            return 1;
+        };
+        defer gpa.free(buf);
+        write(io, filterForPipe(rendered, buf));
         return 0;
     }
 
@@ -209,6 +214,21 @@ fn appendStyled(gpa: std.mem.Allocator, out: *std.ArrayList(u8), color: bool, co
 
 fn write(io: std.Io, bytes: []const u8) void {
     std.Io.File.writeStreamingAll(.stderr(), io, bytes) catch {};
+}
+
+/// The bytes the non-tty branch writes: `rendered` with control bytes and
+/// escape sequences from the document stripped while line structure survives.
+/// `buf` must hold `rendered.len`; returns the used prefix.
+fn filterForPipe(rendered: []const u8, buf: []u8) []const u8 {
+    return viewport.stripControls(rendered, "\n\t", buf);
+}
+
+test "markdown non-tty output filters escapes" {
+    var buf: [128]u8 = undefined;
+    try std.testing.expectEqualStrings(
+        "title]0;pwned\nbody\tkept",
+        filterForPipe("title\x1b]0;pwned\x07\nbody\tkept", &buf),
+    );
 }
 
 test "splitFrontmatter keeps a complete YAML block separate" {
