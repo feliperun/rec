@@ -9,6 +9,7 @@ const builtin = @import("builtin");
 
 pub const Error = error{
     CreateFailed,
+    PathAlreadyExists,
     WriteFailed,
     FinalizeFailed,
     InvalidPcm,
@@ -16,16 +17,18 @@ pub const Error = error{
 
 const is_windows = builtin.os.tag == .windows;
 
-/// O_WRONLY | O_CREAT | O_TRUNC, spelled through std.posix because the octal
-/// differs between macOS (0x601) and Linux (0o1101). Windows routes through
-/// the CRT's _open flags — _O_BINARY is what stops the CRT from rewriting
-/// \n bytes and corrupting the PCM body.
+/// O_WRONLY | O_CREAT | O_TRUNC | O_EXCL, spelled through std.posix because
+/// the octal differs between macOS (0x601) and Linux (0o1101). Windows routes
+/// through the CRT's _open flags — _O_BINARY is what stops the CRT from
+/// rewriting \n bytes and corrupting the PCM body; _O_EXCL makes a taken
+/// recording name fail instead of truncating it.
 pub const create_write_flags: c_int = if (is_windows)
-    0x0001 | 0x0100 | 0x0200 | 0x8000 // _O_WRONLY | _O_CREAT | _O_TRUNC | _O_BINARY
+    0x0001 | 0x0100 | 0x0200 | 0x0400 | 0x8000 // _O_WRONLY | _O_CREAT | _O_TRUNC | _O_EXCL | _O_BINARY
 else
     @bitCast(std.posix.O{
         .ACCMODE = .WRONLY,
         .CREAT = true,
+        .EXCL = true,
         .TRUNC = true,
     });
 
@@ -61,8 +64,7 @@ pub const Encoder = struct {
 
         var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
         const path_z = std.fmt.bufPrintZ(&path_buf, "{s}", .{path}) catch return error.CreateFailed;
-        const fd = openNew(path_z.ptr);
-        if (fd < 0) return error.CreateFailed;
+        const fd = try openNew(path_z.ptr);
         errdefer _ = cclose(fd);
 
         var header: [44]u8 = undefined;
@@ -79,21 +81,28 @@ pub const Encoder = struct {
     }
 
     /// Patches the RIFF/data chunk sizes in and closes the file — a WAV is
-    /// only valid once its sizes describe the body actually written.
+    /// only valid once its sizes describe the body actually written. The
+    /// descriptor is released before the status is inspected, so no failure
+    /// (including the 4 GiB RIFF ceiling) leaves it open for `abort` to miss.
     pub fn finish(self: *Encoder) Error!void {
         if (self.closed) return;
         self.closed = true;
+
         // RIFF is a u32-sized container; a longer body cannot be published.
-        if (self.data_bytes > std.math.maxInt(u32) - 36) return error.FinalizeFailed;
-        const data_bytes: u32 = @intCast(self.data_bytes);
+        var failed = self.data_bytes > std.math.maxInt(u32) - 36;
+        if (!failed) {
+            const data_bytes: u32 = @intCast(self.data_bytes);
+            var patch: [4]u8 = undefined;
+            std.mem.writeInt(u32, &patch, 36 + data_bytes, .little);
+            if (cpwrite(self.fd, &patch, 4) != 4) failed = true;
+            if (!failed) {
+                std.mem.writeInt(u32, &patch, data_bytes, .little);
+                if (cpwrite(self.fd, &patch, 40) != 4) failed = true;
+            }
+        }
 
-        var patch: [4]u8 = undefined;
-        std.mem.writeInt(u32, &patch, 36 + data_bytes, .little);
-        if (cpwrite(self.fd, &patch, 4) != 4) return error.FinalizeFailed;
-        std.mem.writeInt(u32, &patch, data_bytes, .little);
-        if (cpwrite(self.fd, &patch, 40) != 4) return error.FinalizeFailed;
-
-        if (cclose(self.fd) != 0) return error.FinalizeFailed;
+        if (cclose(self.fd) != 0) failed = true;
+        if (failed) return error.FinalizeFailed;
     }
 
     /// Closes an unfinished encoder without making its file valid.
@@ -104,8 +113,9 @@ pub const Encoder = struct {
     }
 };
 
-/// Encodes interleaved s16le PCM (the capture format) into a WAV at `path`,
-/// overwriting any file already there.
+/// Encodes interleaved s16le PCM (the capture format) into a WAV at `path`.
+/// The create is exclusive, so an existing file is refused rather than
+/// overwritten.
 pub fn encode(path: []const u8, pcm: []const u8, sample_rate: u32, channels: u32) Error!void {
     var encoder = try Encoder.init(path, sample_rate, channels);
     defer encoder.abort();
@@ -179,9 +189,20 @@ extern "c" fn _getpid() c_int;
 const seek_set: c_int = 0;
 const seek_cur: c_int = 1;
 
-fn openNew(path: [*:0]const u8) c_int {
-    if (is_windows) return _open(path, create_write_flags, @as(c_uint, 0o600)); // _S_IREAD|_S_IWRITE
-    return open(path, create_write_flags, @as(c_uint, 0o644));
+/// Opens `path` for an exclusive create. A name that is already taken — by
+/// another recorder's in-progress `.part` file or by a finished recording —
+/// reports `error.PathAlreadyExists` instead of truncating it. Owner-only on
+/// both platforms.
+fn openNew(path: [*:0]const u8) Error!c_int {
+    const fd = if (is_windows)
+        _open(path, create_write_flags, @as(c_uint, 0o600)) // _S_IREAD|_S_IWRITE
+    else
+        open(path, create_write_flags, @as(c_uint, 0o600));
+    if (fd < 0) {
+        if (std.c.errno(fd) == .EXIST) return error.PathAlreadyExists;
+        return error.CreateFailed;
+    }
+    return fd;
 }
 
 fn openReadOnly(path: [*:0]const u8) c_int {
@@ -252,10 +273,11 @@ pub fn readWholeFile(gpa: std.mem.Allocator, path: []const u8) ReadError![]u8 {
 
 // --- test-only file plumbing (cut.zig's tests share it) ----------------------
 
-/// Creates (or truncates) the file at `path_z` and writes `bytes` into it.
+/// Creates the file at `path_z` and writes `bytes` into it. The recording
+/// open is exclusive, so a leftover from an earlier run is cleared first.
 pub fn writeFileZ(path_z: [*:0]const u8, bytes: []const u8) bool {
-    const fd = openNew(path_z);
-    if (fd < 0) return false;
+    unlinkZ(path_z);
+    const fd = openNew(path_z) catch return false;
     writeAll(fd, bytes) catch {
         _ = cclose(fd);
         return false;
@@ -358,7 +380,7 @@ test "stream encoder finalizes a recording written in chunks" {
     try std.testing.expectEqualSlices(u8, pcm.items, parseWav(image).?.pcm);
 }
 
-test "finish rejects bodies past the 4 GiB RIFF limit" {
+test "wav.finish releases the descriptor when the RIFF ceiling is hit" {
     var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const path = testPath(&path_buf, ".huge.wav");
     defer _ = unlink(path);
@@ -367,6 +389,29 @@ test "finish rejects bodies past the 4 GiB RIFF limit" {
     defer encoder.abort();
     encoder.data_bytes = std.math.maxInt(u32); // larger than u32 - 36
     try std.testing.expectError(error.FinalizeFailed, encoder.finish());
+    // The descriptor was released before the error came back, so closing it
+    // again finds nothing (a leak would close successfully here).
+    try std.testing.expect(cclose(encoder.fd) != 0);
+}
+
+test "wav.create_write_flags is exclusive" {
+    if (is_windows) {
+        try std.testing.expect(create_write_flags & 0x0400 != 0); // _O_EXCL
+    } else {
+        const o: std.posix.O = @bitCast(create_write_flags);
+        try std.testing.expect(o.EXCL);
+    }
+
+    // The flag is not just set: a second open of the same name must refuse
+    // rather than truncate the first recorder's file.
+    var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path = testPath(&path_buf, ".exclusive.wav");
+    defer unlinkZ(path);
+    unlinkZ(path);
+
+    var first = try Encoder.init(std.mem.sliceTo(path, 0), 48000, 2);
+    defer first.abort();
+    try std.testing.expectError(error.PathAlreadyExists, Encoder.init(std.mem.sliceTo(path, 0), 48000, 2));
 }
 
 test "parseWav finds the data chunk and layout" {
