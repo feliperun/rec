@@ -235,20 +235,18 @@ pub fn configDirPath(home_dir: []const u8, xdg_config_home: ?[]const u8, buf: []
 
     var n: usize = 0;
     if (base) |root| {
-        appendStr(buf, &n, root);
+        if (!appendStr(buf, &n, root)) return null;
         if (buf[n - 1] != '/') {
-            buf[n] = '/';
-            n += 1;
+            if (!appendStr(buf, &n, "/")) return null;
         }
-        appendStr(buf, &n, "rec");
+        if (!appendStr(buf, &n, "rec")) return null;
     } else {
         if (home_dir.len == 0) return null;
-        appendStr(buf, &n, home_dir);
+        if (!appendStr(buf, &n, home_dir)) return null;
         if (buf[n - 1] != '/') {
-            buf[n] = '/';
-            n += 1;
+            if (!appendStr(buf, &n, "/")) return null;
         }
-        appendStr(buf, &n, ".config/rec");
+        if (!appendStr(buf, &n, ".config/rec")) return null;
     }
     return buf[0..n];
 }
@@ -1132,20 +1130,20 @@ fn flattenTail(buf: *[max_note_bytes]u8, len: *usize, tail: []const u8) void {
 fn joinPath(dir: []const u8, name: []const u8, buf: []u8) ?[]const u8 {
     if (dir.len == 0) return null;
     var n: usize = 0;
-    appendStr(buf, &n, dir);
+    if (!appendStr(buf, &n, dir)) return null;
     if (buf[n - 1] != '/') {
-        buf[n] = '/';
-        n += 1;
+        if (!appendStr(buf, &n, "/")) return null;
     }
-    appendStr(buf, &n, name);
+    if (!appendStr(buf, &n, name)) return null;
     return buf[0..n];
 }
 
-fn appendStr(buf: []u8, n: *usize, s: []const u8) void {
-    for (s) |ch| {
-        buf[n.*] = ch;
-        n.* += 1;
-    }
+/// Appends `s` to `buf` at `n.*`; false (and no write) when it would not fit.
+fn appendStr(buf: []u8, n: *usize, s: []const u8) bool {
+    if (s.len > buf.len - n.*) return false;
+    @memcpy(buf[n.*..][0..s.len], s);
+    n.* += s.len;
+    return true;
 }
 
 /// Minimal JSON string escaper for the strings rec writes itself (config).
@@ -1199,6 +1197,33 @@ test "config dir prefers absolute XDG override" {
     const fallback = configDirPath("/Users/e", "relative", &buf).?;
     try std.testing.expectEqualStrings("/Users/e/.config/rec", fallback);
     try std.testing.expect(configDirPath("", null, &buf) == null);
+}
+
+test "llm.configDirPath refuses a value that does not fit" {
+    // "/Users/e/.config/rec" is 20 bytes; one byte short must fail closed
+    // instead of writing past the caller's buffer.
+    var short: [19]u8 = undefined;
+    try std.testing.expect(configDirPath("/Users/e", null, &short) == null);
+
+    var exact: [20]u8 = undefined;
+    try std.testing.expectEqualStrings(
+        "/Users/e/.config/rec",
+        configDirPath("/Users/e", null, &exact).?,
+    );
+
+    // The absolute-XDG branch is bounded the same way.
+    var xdg_short: [14]u8 = undefined;
+    try std.testing.expect(configDirPath("/Users/e", "/custom/cfg", &xdg_short) == null);
+}
+
+test "llm.joinPath refuses a value that does not fit" {
+    var short: [7]u8 = undefined;
+    try std.testing.expect(joinPath("dir", "name", &short) == null);
+
+    var exact: [8]u8 = undefined;
+    try std.testing.expectEqualStrings("dir/name", joinPath("dir", "name", &exact).?);
+
+    try std.testing.expect(joinPath("", "name", &exact) == null);
 }
 
 test "validTemplateName blocks traversal and odd characters" {
