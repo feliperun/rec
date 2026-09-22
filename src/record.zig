@@ -41,25 +41,24 @@ pub fn recordOnce(
     var name: [15]u8 = undefined;
     localTimestamp(&name);
 
-    var filename_buf: [19]u8 = undefined;
-    @memcpy(filename_buf[0..15], &name);
-    @memcpy(filename_buf[15..19], library.recording.ext);
-    const filename = filename_buf[0..19];
-
+    // Pick the first free `YYYYMMDD-HHMMSS[-N]` stem; the `.part` open below
+    // is exclusive, so a same-second recorder lands on the next suffix
+    // instead of truncating this one's in-progress audio.
+    var stem_buf: [stem_buf_len]u8 = undefined;
+    var filename_buf: [stem_buf_len + library.recording.ext.len]u8 = undefined;
     var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const path = library.recordingPath(recordings_path, filename, &path_buf) orelse {
-        printStderr(io, "record: recording path is too long\n");
-        return 1;
-    };
-
     var temp_path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const temp_path = std.fmt.bufPrint(&temp_path_buf, "{s}.part", .{path}) catch {
+    const probe = RecordingNameProbe{ .io = io, .recordings_path = recordings_path };
+    const picked = nextStem(&stem_buf, &name, probe, 0) orelse {
+        printStderr(io, "record: too many recordings share this second\n");
+        return 1;
+    };
+    const candidate = buildCandidate(picked.stem, recordings_path, &filename_buf, &path_buf, &temp_path_buf) orelse {
         printStderr(io, "record: recording path is too long\n");
         return 1;
     };
-    // A killed process can only leave this private work file behind; never
-    // expose it to the recording library as a recording.
-    std.Io.Dir.cwd().deleteFile(io, temp_path) catch {};
+    var path = candidate.path;
+    var temp_path = candidate.temp_path;
 
     var rec = capture.Recorder.init(gpa);
     defer rec.deinit();
@@ -109,10 +108,30 @@ pub fn recordOnce(
         printStderr(io, "\n");
     }
 
-    var encoder = library.recording.Encoder.init(temp_path, rec.sample_rate, rec.channels) catch {
-        std.Io.Dir.cwd().deleteFile(io, temp_path) catch {};
-        result = .{ .failed = "record: failed to initialize the " ++ library.recording.format_name ++ " encoder\n" };
-        return 1;
+    var attempt: usize = picked.attempt + 1;
+    var encoder = while (true) {
+        const enc = library.recording.Encoder.init(temp_path, rec.sample_rate, rec.channels) catch |err| {
+            if (isPathAlreadyExists(err)) {
+                // Another recorder won the race for this stem between the
+                // probe and the exclusive open: move to the next suffix.
+                const next = nextStem(&stem_buf, &name, probe, attempt) orelse {
+                    printStderr(io, "record: too many recordings share this second\n");
+                    return 1;
+                };
+                attempt = next.attempt + 1;
+                const next_candidate = buildCandidate(next.stem, recordings_path, &filename_buf, &path_buf, &temp_path_buf) orelse {
+                    printStderr(io, "record: recording path is too long\n");
+                    return 1;
+                };
+                path = next_candidate.path;
+                temp_path = next_candidate.temp_path;
+                continue;
+            }
+            std.Io.Dir.cwd().deleteFile(io, temp_path) catch {};
+            result = .{ .failed = "record: failed to initialize the " ++ library.recording.format_name ++ " encoder\n" };
+            return 1;
+        };
+        break enc;
     };
     var encoder_open = true;
     defer {
@@ -427,6 +446,93 @@ fn put2(buf: []u8, v: u32) void {
 fn put4(buf: []u8, v: u32) void {
     put2(buf[0..2], v / 100);
     put2(buf[2..4], v % 100);
+}
+
+/// "YYYYMMDD-HHMMSS" plus room for the longest `-NNN` suffix the bounded
+/// same-second search emits.
+const stem_buf_len = 15 + 1 + 3;
+
+/// How many same-second names a recorder probes before giving up: the bare
+/// timestamp, then `-2` through `-100`.
+const max_recording_attempts: usize = 100;
+
+const StemChoice = struct { stem: []const u8, attempt: usize };
+
+/// Writes attempt `attempt`'s stem into `out`: the bare `base` first, then
+/// `base-2`, `base-3`, ... and returns it. `out` must hold `stem_buf_len`
+/// bytes for the timestamp-shaped base this module passes.
+fn candidateStem(out: []u8, base: []const u8, attempt: usize) []const u8 {
+    var n: usize = 0;
+    appendStr(out, &n, base) catch unreachable;
+    if (attempt > 0) {
+        out[n] = '-';
+        n += 1;
+        appendUint(out, &n, attempt + 1);
+    }
+    return out[0..n];
+}
+
+/// The first candidate at or after `start` whose `ctx.exists(stem)` is false,
+/// or null once every `max_recording_attempts` candidate is taken.
+fn nextStem(out: []u8, base: []const u8, ctx: anytype, start: usize) ?StemChoice {
+    var attempt = start;
+    while (attempt < max_recording_attempts) : (attempt += 1) {
+        const stem = candidateStem(out, base, attempt);
+        if (!ctx.exists(stem)) return .{ .stem = stem, .attempt = attempt };
+    }
+    return null;
+}
+
+/// A stem's public path and its private `.part` work path.
+const Candidate = struct {
+    path: []const u8,
+    temp_path: []const u8,
+};
+
+fn buildCandidate(
+    stem: []const u8,
+    recordings_path: []const u8,
+    filename_buf: []u8,
+    path_buf: []u8,
+    temp_buf: []u8,
+) ?Candidate {
+    const ext = library.recording.ext;
+    if (filename_buf.len < stem.len + ext.len) return null;
+    @memcpy(filename_buf[0..stem.len], stem);
+    @memcpy(filename_buf[stem.len..][0..ext.len], ext);
+    const filename = filename_buf[0 .. stem.len + ext.len];
+    const path = library.recordingPath(recordings_path, filename, path_buf) orelse return null;
+    const temp_path = std.fmt.bufPrint(temp_buf, "{s}.part", .{path}) catch return null;
+    return .{ .path = path, .temp_path = temp_path };
+}
+
+/// Filesystem probe for `nextStem`: a stem is taken when either its public
+/// name or its `.part` file exists, so a finished recording and a live one
+/// both push the next recorder to the suffixed name.
+const RecordingNameProbe = struct {
+    io: std.Io,
+    recordings_path: []const u8,
+
+    fn exists(self: @This(), stem: []const u8) bool {
+        var filename_buf: [stem_buf_len + library.recording.ext.len]u8 = undefined;
+        var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        var temp_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        // An unbuildable candidate is "free": the caller rebuilds it and
+        // reports the real path error instead of a bogus collision.
+        const candidate = buildCandidate(stem, self.recordings_path, &filename_buf, &path_buf, &temp_buf) orelse return false;
+        return pathExists(self.io, candidate.path) or pathExists(self.io, candidate.temp_path);
+    }
+};
+
+fn pathExists(io: std.Io, path: []const u8) bool {
+    _ = std.Io.Dir.cwd().statFile(io, path, .{}) catch return false;
+    return true;
+}
+
+/// Portable name check for the encoder's collision error, whose error set
+/// differs per platform behind `library.recording`.
+fn isPathAlreadyExists(err: anyerror) bool {
+    return std.mem.eql(u8, @errorName(err), "PathAlreadyExists");
 }
 
 /// Clamped so @intFromFloat cannot overflow i96 for any accepted
@@ -782,4 +888,44 @@ test "level tracker: a quiet trailing partial stays dead" {
     levels.add(std.mem.sliceAsBytes(quiet[0 .. test_window_samples * 6 / 10]));
     levels.finish();
     try std.testing.expect(levels.isDead());
+}
+
+test "recording stems stay unique when the second is taken" {
+    const taken = struct {
+        stems: []const []const u8,
+        fn exists(self: @This(), stem: []const u8) bool {
+            for (self.stems) |s| if (std.mem.eql(u8, s, stem)) return true;
+            return false;
+        }
+    };
+
+    var buf: [stem_buf_len]u8 = undefined;
+    const base = "20260826-093000";
+
+    // Nothing is taken: the bare timestamp wins.
+    const none = [_][]const u8{};
+    const first = nextStem(&buf, base, taken{ .stems = none[0..] }, 0).?;
+    try std.testing.expectEqualStrings(base, first.stem);
+
+    // The first recorder holds the second: the next recorder gets -2.
+    const one = [_][]const u8{base};
+    const second = nextStem(&buf, base, taken{ .stems = one[0..] }, 0).?;
+    try std.testing.expectEqualStrings("20260826-093000-2", second.stem);
+    try std.testing.expectEqual(@as(usize, 1), second.attempt);
+
+    // Both taken: -3, and an already-probed stem is not reconsidered.
+    const two = [_][]const u8{ base, "20260826-093000-2" };
+    const third = nextStem(&buf, base, taken{ .stems = two[0..] }, 0).?;
+    try std.testing.expectEqualStrings("20260826-093000-3", third.stem);
+    const after_two = nextStem(&buf, base, taken{ .stems = one[0..] }, 2).?;
+    try std.testing.expectEqualStrings("20260826-093000-3", after_two.stem);
+
+    // A saturated suffix range reports no candidate rather than looping.
+    var all_stems: [max_recording_attempts][stem_buf_len]u8 = undefined;
+    var all: [max_recording_attempts][]const u8 = undefined;
+    for (0..max_recording_attempts) |i| {
+        all_stems[i] = .{0} ** stem_buf_len;
+        all[i] = candidateStem(&all_stems[i], base, i);
+    }
+    try std.testing.expect(nextStem(&buf, base, taken{ .stems = all[0..] }, 0) == null);
 }
