@@ -5,17 +5,19 @@ on:
     branches: [main]
 
 permissions:
-  contents: write
-  pull-requests: write
+  contents: read
 
 jobs:
   release-please:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
     outputs:
       release_created: ${{ steps.release.outputs.release_created }}
       tag_name: ${{ steps.release.outputs.tag_name }}
     steps:
-      - uses: googleapis/release-please-action@v5
+      - uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5
         id: release
         # Manifest mode: release-please-config.json declares the `simple`
         # type (there is no `zig` type) plus a generic extra-file that bumps
@@ -27,6 +29,8 @@ jobs:
   build:
     needs: release-please
     if: ${{ needs.release-please.outputs.release_created == 'true' }}
+    permissions:
+      contents: write
     strategy:
       fail-fast: false
       matrix:
@@ -46,10 +50,10 @@ jobs:
           - { runs-on: windows-latest, target: x86_64-windows, artifact: rec-windows-x64.exe, bin: rec.exe, sanity: true }
     runs-on: ${{ matrix.runs-on }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ needs.release-please.outputs.tag_name }}
-      - uses: mlugg/setup-zig@v2
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2
         with:
           version: "0.16.0"
       # Releases are always built ReleaseFast: optimized and stripped of
@@ -75,6 +79,13 @@ jobs:
       # The staged artifact must itself run before it ships.
       - run: ./dist/${{ matrix.artifact }} about
         if: matrix.sanity
-      - run: gh release upload "${{ needs.release-please.outputs.tag_name }}" "dist/${{ matrix.artifact }}" --clobber
+      # Each artifact ships with a sibling <artifact>.sha256 in `sha256sum`
+      # text format (lowercase hex, two spaces, basename, LF) so install.sh,
+      # install.ps1 and src/update.zig can verify it. python3 is present on all
+      # three runner OSes; binary mode keeps the line terminator LF on Windows.
+      - name: Generate artifact checksum
+        run: |
+          python3 -c "import hashlib, os; p = 'dist/${{ matrix.artifact }}'; digest = hashlib.sha256(open(p, 'rb').read()).hexdigest(); open(p + '.sha256', 'wb').write((digest + '  ' + os.path.basename(p) + '\n').encode())"
+      - run: gh release upload "${{ needs.release-please.outputs.tag_name }}" "dist/${{ matrix.artifact }}" "dist/${{ matrix.artifact }}.sha256" --clobber
         env:
           GH_TOKEN: ${{ github.token }}

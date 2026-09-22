@@ -32,18 +32,80 @@ if [ -n "$VERSION" ]; then
   release_url="https://api.github.com/repos/${REPO}/releases/tags/${VERSION}"
 fi
 
-download_url="$(curl -fsSL "$release_url" | grep -o "\"browser_download_url\": *\"[^\"]*${asset}\"" | sed -E 's/.*"(https:[^"]+)"/\1/')"
+release_json="$(curl -fsSL "$release_url")"
+
+# Emit exactly the browser_download_url whose path ends in /<name>, so the
+# <asset> lookup cannot also match its <asset>.sha256 sibling.
+extract_url() {
+  printf '%s\n' "$release_json" \
+    | grep -o "\"browser_download_url\": *\"[^\"]*/${1}\"" \
+    | sed -E 's/.*"(https:[^"]+)"/\1/'
+}
+
+download_url="$(extract_url "$asset")"
+checksum_url="$(extract_url "${asset}.sha256")"
 
 if [ -z "$download_url" ]; then
   echo "error: could not find a '${asset}' asset in ${release_url}" >&2
   exit 1
 fi
 
+if [ -z "$checksum_url" ]; then
+  echo "error: could not find a '${asset}.sha256' checksum in ${release_url}" >&2
+  exit 1
+fi
+
+# The JSON comes from api.github.com over TLS, but only trust a release
+# download under this repository; anything else is refused before fetching.
+for url in "$download_url" "$checksum_url"; do
+  case "$url" in
+    "https://github.com/${REPO}/releases/download/"*) ;;
+    *)
+      echo "error: refusing to download from unexpected URL: ${url}" >&2
+      exit 1
+      ;;
+  esac
+done
+
 tmp_bin="$(mktemp)"
-trap 'rm -f "$tmp_bin"' EXIT
+tmp_sum="$(mktemp)"
+trap 'rm -f "$tmp_bin" "$tmp_sum"' EXIT
 
 echo "Downloading ${download_url}..."
 curl -fsSL -o "$tmp_bin" "$download_url"
+curl -fsSL -o "$tmp_sum" "$checksum_url"
+
+checksum_line="$(head -n 1 "$tmp_sum")"
+expected_sum="$(printf '%s\n' "$checksum_line" | awk '{print $1}')"
+checksum_name="$(printf '%s\n' "$checksum_line" | awk '{print $2}')"
+
+if ! printf '%s' "$expected_sum" | grep -Eq '^[0-9a-f]{64}$'; then
+  echo "error: malformed checksum for ${asset}: ${checksum_line}" >&2
+  exit 1
+fi
+
+if [ "$checksum_name" != "$asset" ]; then
+  echo "error: checksum names '${checksum_name}', expected '${asset}'" >&2
+  exit 1
+fi
+
+if command -v sha256sum >/dev/null 2>&1; then
+  actual_sum="$(sha256sum "$tmp_bin" | awk '{print $1}')"
+elif command -v shasum >/dev/null 2>&1; then
+  actual_sum="$(shasum -a 256 "$tmp_bin" | awk '{print $1}')"
+else
+  echo "error: neither sha256sum nor shasum is available to verify the download" >&2
+  exit 1
+fi
+
+if [ "$actual_sum" != "$expected_sum" ]; then
+  echo "error: checksum mismatch for ${asset}" >&2
+  echo "  expected: ${expected_sum}" >&2
+  echo "  actual:   ${actual_sum}" >&2
+  exit 1
+fi
+echo "Verified ${asset} checksum."
+
 # mktemp creates the file 0600 and `chmod +x` honours the umask, which leaves
 # the install at 0711: every user but the installing one loses read access to
 # a binary whose whole point is to sit on a shared PATH.
