@@ -77,7 +77,7 @@ pub fn recordOnce(
     const hint: []const u8 = if (view_tty) "" else " (Ctrl-C to stop)";
     var header_buf: [std.Io.Dir.max_path_bytes + 64]u8 = undefined;
     var hn: usize = 0;
-    appendStr(&header_buf, &hn, "Recording to ");
+    appendStr(&header_buf, &hn, "Recording to ") catch unreachable;
     style.appendStyled(&header_buf, &hn, color, style.cyan, path);
     style.appendStyled(&header_buf, &hn, color, style.dim, hint);
     var screen = LiveView{
@@ -534,20 +534,20 @@ fn printLiveView(
 fn composeStatus(buf: []u8, secs: u32, paused: bool, color: bool, cells_out: *usize) []const u8 {
     var n: usize = 0;
     var cells: usize = 0;
-    appendStr(buf, &n, " ");
+    appendStr(buf, &n, " ") catch unreachable;
     cells += 1;
     style.appendStyled(buf, &n, color, if (paused) style.yellow else style.red, if (paused) "⏸" else "⏺");
     cells += 1;
-    appendStr(buf, &n, " ");
+    appendStr(buf, &n, " ") catch unreachable;
     cells += 1;
     style.begin(buf, &n, color, style.bold);
     cells += appendTimer(buf, &n, secs);
     style.end(buf, &n, color);
     style.begin(buf, &n, color, style.dim);
     const word: []const u8 = if (paused) "resume" else "pause";
-    appendStr(buf, &n, "  SPACE=");
-    appendStr(buf, &n, word);
-    appendStr(buf, &n, " ESC=stop");
+    appendStr(buf, &n, "  SPACE=") catch unreachable;
+    appendStr(buf, &n, word) catch unreachable;
+    appendStr(buf, &n, " ESC=stop") catch unreachable;
     style.end(buf, &n, color);
     cells += "  SPACE=".len + word.len + " ESC=stop".len;
     cells_out.* = cells;
@@ -591,18 +591,18 @@ fn printStyledStderr(io: std.Io, color: bool, code: []const u8, text: []const u8
 fn printSaved(io: std.Io, path: []const u8, dur_csec: u64, bytes: u64, color: bool) void {
     var buf: [std.Io.Dir.max_path_bytes + 128]u8 = undefined;
     var n: usize = 0;
-    appendStr(&buf, &n, "\nSaved ");
+    appendStr(&buf, &n, "\nSaved ") catch unreachable;
     style.appendStyled(&buf, &n, color, style.cyan, path);
     style.begin(&buf, &n, color, style.dim);
-    appendStr(&buf, &n, " (");
+    appendStr(&buf, &n, " (") catch unreachable;
     appendUint(&buf, &n, dur_csec / 100);
-    appendStr(&buf, &n, ".");
+    appendStr(&buf, &n, ".") catch unreachable;
     append2(&buf, &n, dur_csec % 100);
-    appendStr(&buf, &n, " s, ");
+    appendStr(&buf, &n, " s, ") catch unreachable;
     appendUint(&buf, &n, bytes / 1024);
-    appendStr(&buf, &n, " KiB)");
+    appendStr(&buf, &n, " KiB)") catch unreachable;
     style.end(&buf, &n, color);
-    appendStr(&buf, &n, "\n");
+    appendStr(&buf, &n, "\n") catch unreachable;
     printStderr(io, buf[0..n]);
 }
 
@@ -613,11 +613,30 @@ pub fn append2(buf: []u8, n: *usize, v: u64) void {
     n.* += 1;
 }
 
-pub fn appendStr(buf: []u8, n: *usize, s: []const u8) void {
-    for (s) |ch| {
-        buf[n.*] = ch;
-        n.* += 1;
-    }
+/// Copies `s` into `buf` at `n.*`, advancing `n.*`. Refuses (without
+/// touching `buf` or `n.*`) when the remaining space cannot hold `s`, so no
+/// caller can overrun a fixed buffer through this primitive.
+pub fn appendStr(buf: []u8, n: *usize, s: []const u8) error{NoSpaceLeft}!void {
+    if (buf.len - n.* < s.len) return error.NoSpaceLeft;
+    @memcpy(buf[n.*..][0..s.len], s);
+    n.* += s.len;
+}
+
+test "record.appendStr refuses a buffer too small" {
+    var buf: [4]u8 = undefined;
+    @memset(buf[0..], 0);
+    var n: usize = 0;
+
+    // Too small: refused, leaving the buffer and the cursor untouched.
+    try std.testing.expectError(error.NoSpaceLeft, appendStr(&buf, &n, "12345"));
+    try std.testing.expectEqual(@as(usize, 0), n);
+    try std.testing.expectEqual(@as(u8, 0), buf[0]);
+
+    // An exact fit still succeeds; one more byte does not.
+    try appendStr(&buf, &n, "1234");
+    try std.testing.expectEqualStrings("1234", buf[0..]);
+    try std.testing.expectEqual(@as(usize, 4), n);
+    try std.testing.expectError(error.NoSpaceLeft, appendStr(&buf, &n, "5"));
 }
 
 pub fn appendUint(buf: []u8, n: *usize, v: u64) void {
