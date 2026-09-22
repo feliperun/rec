@@ -577,8 +577,8 @@ fn loadTranscript(io: std.Io, gpa: std.mem.Allocator, recordings_path: []const u
 fn transcriptPath(recordings_path: []const u8, name: []const u8, buf: []u8) ?[]const u8 {
     var md_name_buf: [80]u8 = undefined;
     var md_len: usize = 0;
-    record.appendStr(&md_name_buf, &md_len, library.stripExt(name));
-    record.appendStr(&md_name_buf, &md_len, ".md");
+    record.appendStr(&md_name_buf, &md_len, library.stripExt(name)) catch return null;
+    record.appendStr(&md_name_buf, &md_len, ".md") catch return null;
     return library.recordingPath(recordings_path, md_name_buf[0..md_len], buf);
 }
 
@@ -700,4 +700,14 @@ test "appendTime formats MM:SS and H:MM:SS" {
     n = 0;
     _ = appendTime(&buf, &n, -5);
     try std.testing.expectEqualStrings("00:00", buf[0..n]);
+}
+
+test "transcriptPath refuses a stem that does not fit" {
+    var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    // A 79-byte stem leaves no room for the ".md" suffix in the 80-byte buffer.
+    try std.testing.expect(transcriptPath("recordings", "a" ** 79, &buf) == null);
+
+    // A stem that fits still resolves to the sibling path.
+    const path = transcriptPath("recordings", "20260826-143000", &buf).?;
+    try std.testing.expectEqualStrings("recordings/20260826-143000.md", path);
 }

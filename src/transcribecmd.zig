@@ -73,6 +73,37 @@ fn parseTranscribeArgs(args: []const [:0]const u8) TranscribeArgs {
     return .{ .ok = parsed };
 }
 
+/// Builds the output path for the transcript: the explicit `--out` value as
+/// given, or the recording's stem plus `.md` beside the recording. Returns
+/// error.NoSpaceLeft when the result cannot fit `buf`, so the caller reports
+/// the usage error instead of overrunning the stack buffer.
+fn resolveOutPath(
+    buf: []u8,
+    out: ?[]const u8,
+    recordings_path: []const u8,
+    name: []const u8,
+) error{NoSpaceLeft}![]const u8 {
+    var n: usize = 0;
+    if (out) |p| {
+        try record.appendStr(buf, &n, p);
+    } else {
+        const base = library.recordingPath(recordings_path, library.stripExt(name), buf) orelse
+            return error.NoSpaceLeft;
+        n = base.len;
+        try record.appendStr(buf, &n, ".md");
+    }
+    return buf[0..n];
+}
+
+/// Whether the `--out` candidate resolves to the recording being
+/// transcribed. `resolved_out` is the candidate's `realPathFile` result; a
+/// path that does not resolve does not exist yet, so it cannot be the
+/// recording. Both inputs are absolute, already-resolved paths.
+fn outIsRecording(resolved_out: ?[]const u8, recording_abs: []const u8) bool {
+    const out = resolved_out orelse return false;
+    return std.mem.eql(u8, out, recording_abs);
+}
+
 /// The transcribe command body, shaped like playSelection: resolve the
 /// selection against the library, send the recording to Deepgram through
 /// src/transcribe.zig, and write an OKF markdown transcript next to it.
@@ -158,18 +189,23 @@ pub fn run(
 
     // Default artifact sits beside the recording in $HOME/recordings.
     var out_path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    var out_len: usize = 0;
-    if (ta.out) |p| {
-        record.appendStr(&out_path_buf, &out_len, p);
-    } else {
-        const base = library.recordingPath(recordings_path, library.stripExt(name), &out_path_buf) orelse {
-            ui.print(io, "transcribe: cannot write output path\n");
-            return 1;
-        };
-        out_len = base.len;
-        record.appendStr(&out_path_buf, &out_len, ".md");
+    const out_path = resolveOutPath(&out_path_buf, ta.out, recordings_path, name) catch {
+        ui.print(io, "transcribe: caminho de saída longo demais\n");
+        return 1;
+    };
+
+    // Creating the artifact would truncate the recording if --out names it,
+    // so refuse before any network request or file creation. Both sides are
+    // resolved; a candidate that does not resolve yet cannot be the source.
+    var out_abs_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const out_abs: ?[]const u8 = if (std.Io.Dir.cwd().realPathFile(io, out_path, &out_abs_buf)) |n|
+        out_abs_buf[0..n]
+    else |_|
+        null;
+    if (outIsRecording(out_abs, abs_buf[0..abs_len])) {
+        ui.print(io, "transcribe: --out não pode ser o próprio arquivo de entrada\n");
+        return 1;
     }
-    const out_path: []const u8 = out_path_buf[0..out_len];
 
     var result: transcribe.TranscribeOutput = .{ .json = .empty };
     defer result.json.deinit(gpa);
@@ -493,4 +529,38 @@ test "flattenTail collapses curl's multiline stderr into one line" {
     // An empty tail stays empty, not a stray space.
     var empty: [512]u8 = undefined;
     try std.testing.expectEqualStrings("", flattenTail(&empty, 0));
+}
+
+test "transcribe out path must fit the buffer" {
+    var small: [8]u8 = undefined;
+    // The explicit --out must fit whole; one byte too many is refused.
+    try std.testing.expectError(
+        error.NoSpaceLeft,
+        resolveOutPath(&small, "123456789", "recs", "a"),
+    );
+    try std.testing.expectEqualStrings(
+        "12345678",
+        try resolveOutPath(&small, "12345678", "recs", "a"),
+    );
+
+    // The default sibling path appends ".md" through the same checked copy.
+    var tight: [8]u8 = undefined; // "recs/a" + ".md" does not fit
+    try std.testing.expectError(
+        error.NoSpaceLeft,
+        resolveOutPath(&tight, null, "recs", "a"),
+    );
+    var roomy: [9]u8 = undefined;
+    try std.testing.expectEqualStrings(
+        "recs/a.md",
+        try resolveOutPath(&roomy, null, "recs", "a"),
+    );
+}
+
+test "transcribe out must not be the source recording" {
+    const recording: []const u8 = "/home/u/recordings/20260826-143000.m4a";
+    // The same resolved path is refused; a different one is not.
+    try std.testing.expect(outIsRecording(recording, recording));
+    try std.testing.expect(!outIsRecording("/home/u/recordings/20260826-143000.md", recording));
+    // A candidate that does not exist yet cannot be the recording.
+    try std.testing.expect(!outIsRecording(null, recording));
 }
