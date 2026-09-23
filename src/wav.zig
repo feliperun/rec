@@ -302,21 +302,30 @@ fn envStr(name: [*:0]const u8) ?[]const u8 {
     return std.mem.span(v);
 }
 
+/// The always-present scratch directory for test artifacts: `TMPDIR` on POSIX
+/// with the system temp directory (`/tmp`) as fallback, and `TEMP`/`TMP` on
+/// Windows. Never the working directory, so a test artifact cannot land in the
+/// source tree. Null only on a platform that exports none of those, which
+/// `testPath` turns into a loud test failure instead of a silent fallback.
 fn testDir() ?[]const u8 {
     if (envStr("TMPDIR")) |d| return d;
     if (is_windows) {
         if (envStr("TEMP")) |d| return d;
         if (envStr("TMP")) |d| return d;
+        return null;
     }
-    return null;
+    return "/tmp";
 }
 
 /// Scratch path for test artifacts (created and unlinked by the same test):
-/// the platform temp dir when the environment exports one, else the working
-/// directory. `buf` must be max_path_bytes and holds the returned bytes.
+/// `rec-wav-test-<pid><suffix>` under the system temp directory, guaranteed
+/// never to be the working directory. `buf` must be max_path_bytes and holds
+/// the returned bytes. If no temp directory exists the test fails loudly
+/// rather than writing next to the source.
 pub fn testPath(buf: []u8, suffix: []const u8) [*:0]u8 {
     const pid = if (is_windows) _getpid() else getpid();
-    return std.fmt.bufPrintZ(buf, "{s}/rec-wav-test-{d}{s}", .{ testDir() orelse ".", pid, suffix }) catch unreachable;
+    const dir = testDir() orelse @panic("rec-wav tests: no temp directory available");
+    return std.fmt.bufPrintZ(buf, "{s}/rec-wav-test-{d}{s}", .{ dir, pid, suffix }) catch unreachable;
 }
 
 // --- tests -------------------------------------------------------------------
@@ -412,6 +421,30 @@ test "wav.create_write_flags is exclusive" {
     var first = try Encoder.init(std.mem.sliceTo(path, 0), 48000, 2);
     defer first.abort();
     try std.testing.expectError(error.PathAlreadyExists, Encoder.init(std.mem.sliceTo(path, 0), 48000, 2));
+}
+
+test "wav.openNew creates owner-only files" {
+    var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path = testPath(&path_buf, ".mode");
+    defer unlinkZ(path);
+    unlinkZ(path);
+
+    // The file is created through the same exclusive open path the recorder
+    // uses, so this checks the 0o600 the recording actually lands with.
+    const fd = try openNew(path);
+    defer _ = cclose(fd);
+
+    // Windows has no POSIX mode; owner-only is expressed through _open's
+    // _S_IREAD|_S_IWRITE argument there.
+    if (is_windows) return;
+
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    const io = threaded.io();
+    const stat = try std.Io.Dir.cwd().statFile(io, std.mem.sliceTo(path, 0), .{});
+    try std.testing.expectEqual(
+        @as(std.posix.mode_t, 0o600),
+        @as(std.posix.mode_t, @intFromEnum(stat.permissions)) & 0o777,
+    );
 }
 
 test "parseWav finds the data chunk and layout" {
