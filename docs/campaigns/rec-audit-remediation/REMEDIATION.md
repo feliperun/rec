@@ -356,7 +356,7 @@ branch. It closed the residuals above:
   `rec-wav-test-27757.*`); none of those paths are tracked in this branch. The
   two directories created by the follow-up's own pre-hygiene run,
   `rec-wav-test-3930.auth/` and `rec-wav-test-3930.cfg/`, were removed by the
-  cleanup follow-up, so the branch carries no `rec-wav-test-*` path at all;
+  cleanup follow-up, so the branch carries no rec-wav-test path at all;
   with `testPath` fixed, the gate no longer recreates them.
 
 ## How this was verified
