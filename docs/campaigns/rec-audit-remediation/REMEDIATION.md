@@ -281,29 +281,83 @@ const copy = @min(n, buf.len);
 
 ## Not fixed here
 
-No finding in the table is left without a change in the diff. The items below
-are parts of findings the diff does not close, or verification gaps.
+The follow-up contract described in the next section closed the three
+non-Windows items this section used to list. One item remains open.
 
 - **Windows-only self-update rename dance.** `src/update.zig:349-360` still
   swaps the running image with `MoveFileExW`, unchanged. No host in this
   campaign can execute Windows, so that path is code-reviewed only. The
   checksum check at `src/update.zig:337` runs before the platform split, so the
   downloaded bytes are verified on Windows too.
-- **`rec play` still prints the rendered document unfiltered.** FINDING-SYNTH-13
-  fixed `markdown.show`, but the non-interactive playback path writes
-  `markdown.render` output through `printStderr` (`src/playback.zig:115-120`),
-  so `rec play <name> </dev/null` with stderr on a terminal can still deliver
-  document escape bytes. `src/playback.zig` was not in any change node's file
-  set.
-- **`rec transcribe --refine` still unwraps the template directory.**
-  `src/transcribecmd.zig:333` keeps `llm.templatesDirPath(config_dir,
-  &tpl_buf).?`. With a pathologically long `XDG_CONFIG_HOME`/`HOME` the
-  now-bounded `joinPath` returns null and the `.?` panics; A.6.1's overflow is
-  closed but this caller does not report the error.
-- **FINDING-SYNTH-17 has no dedicated assertion.** `src/wav.zig:196-201` opens
-  with mode `0o600` on both platforms, but no test inspects the resulting mode;
-  `wav.create_write_flags is exclusive` exercises the same open path and proves
-  only the exclusive-create half.
+
+## Follow-up
+
+The follow-up contract `rec-audit-remediation-hygiene` is integrated in this
+branch. It closed the residuals above:
+
+- **`rec play` no longer prints the rendered document unfiltered.** The
+  non-interactive playback path now allocates a filter buffer and writes the
+  filtered document (`src/playback.zig:117-128`), which routes
+  `markdown.render` output through the shared control-byte filter:
+
+  ```zig
+  fn filterDocument(rendered: []const u8, buf: []u8) []const u8 {
+      return viewport.stripControls(rendered, "\n\t", buf);
+  }
+  ```
+
+  (`src/playback.zig:607-609`). Test: `playback non-interactive document is
+  filtered` (`src/playback.zig:730-737`); the whole unit suite is run with
+  `zig build test -Dtarget=x86_64-linux-gnu --summary all`.
+- **`rec transcribe --refine` no longer unwraps the template directory.**
+  `src/transcribecmd.zig:333-336` replaces the `.?` with a reported `orelse`:
+
+  ```zig
+  const templates_dir = llm.templatesDirPath(config_dir, &tpl_buf) orelse {
+      ui.print(io, "refine: ignorado (sem diretório de templates)\n");
+      return;
+  };
+  ```
+
+  No dedicated unit test was added for this caller. The `null` it now handles
+  is the one asserted by `llm.configDirPath refuses a value that does not fit`
+  and `llm.joinPath refuses a value that does not fit` (`src/llm.zig:1202-1227`),
+  and the branch is compiled and run by
+  `zig build test -Dtarget=x86_64-linux-gnu --summary all`.
+- **FINDING-SYNTH-17 now has a dedicated assertion.** `src/wav.zig:426-448`
+  adds `wav.openNew creates owner-only files`, which opens through `openNew`
+  and inspects the resulting POSIX mode:
+
+  ```zig
+  const fd = try openNew(path);
+  ...
+  try std.testing.expectEqual(
+      @as(std.posix.mode_t, 0o600),
+      @as(std.posix.mode_t, @intFromEnum(stat.permissions)) & 0o777,
+  );
+  ```
+
+  `openNew` still creates with `0o600` (`src/wav.zig:196-201`), so the test
+  proves the mode half that `wav.create_write_flags is exclusive` covered only
+  indirectly. This closes the verification gap recorded in the
+  FINDING-SYNTH-17 row of the table above.
+- **Test artifacts no longer land in the tree.** `testDir` now resolves to
+  `TMPDIR` or, on POSIX, the system temp directory `/tmp`
+  (`src/wav.zig:305-318`), and `testPath` refuses the old working-directory
+  fallback (`src/wav.zig:325-329`):
+
+  ```zig
+  const dir = testDir() orelse @panic("rec-wav tests: no temp directory available");
+  return std.fmt.bufPrintZ(buf, "{s}/rec-wav-test-{d}{s}", .{ dir, pid, suffix }) catch unreachable;
+  ```
+
+  The test-hygiene node deleted every `rec-wav-test-*` path the first
+  contract's seal committed (`rec-wav-test-11312.*` through
+  `rec-wav-test-27757.*`); none of those paths are tracked in this branch. Two
+  directories created by the follow-up's own pre-hygiene run,
+  `rec-wav-test-3930.auth/` and `rec-wav-test-3930.cfg/`, are still tracked at
+  HEAD because the candidate merge kept the residual-fixes side that added
+  them; with `testPath` fixed, the gate no longer recreates them.
 
 ## How this was verified
 
