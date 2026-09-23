@@ -353,11 +353,11 @@ branch. It closed the residuals above:
 
   The test-hygiene node deleted every `rec-wav-test-*` path the first
   contract's seal committed (`rec-wav-test-11312.*` through
-  `rec-wav-test-27757.*`); none of those paths are tracked in this branch. Two
-  directories created by the follow-up's own pre-hygiene run,
-  `rec-wav-test-3930.auth/` and `rec-wav-test-3930.cfg/`, are still tracked at
-  HEAD because the candidate merge kept the residual-fixes side that added
-  them; with `testPath` fixed, the gate no longer recreates them.
+  `rec-wav-test-27757.*`); none of those paths are tracked in this branch. The
+  two directories created by the follow-up's own pre-hygiene run,
+  `rec-wav-test-3930.auth/` and `rec-wav-test-3930.cfg/`, were removed by the
+  cleanup follow-up, so the branch carries no `rec-wav-test-*` path at all;
+  with `testPath` fixed, the gate no longer recreates them.
 
 ## How this was verified
 
