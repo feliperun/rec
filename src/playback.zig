@@ -115,9 +115,16 @@ pub fn playSelection(io: std.Io, gpa: std.mem.Allocator, selection: []const u8, 
     if (transcript_raw) |doc| transcript_view = markdown.render(gpa, doc, style.detect(io, .stderr())) catch null;
 
     if (transcript_view) |view| {
-        printStderr(io, view);
-        if (view.len == 0 or view[view.len - 1] != '\n') printStderr(io, "\n");
-        printStderr(io, "\n");
+        if (gpa.alloc(u8, view.len)) |filtered_buf| {
+            defer gpa.free(filtered_buf);
+            const filtered = filterDocument(view, filtered_buf);
+            printStderr(io, filtered);
+            if (filtered.len == 0 or filtered[filtered.len - 1] != '\n') printStderr(io, "\n");
+            printStderr(io, "\n");
+        } else |_| {
+            // Without a buffer to filter into, skip the document rather than
+            // hand a terminal the raw escape bytes it may carry.
+        }
     }
     printStderr(io, "Playing ");
     printStderr(io, name);
@@ -593,6 +600,14 @@ fn printStderr(io: std.Io, msg: []const u8) void {
     std.Io.File.writeStreamingAll(.stderr(), io, msg) catch {};
 }
 
+/// The bytes the non-interactive playback writes: `rendered` with the
+/// document's control bytes and escape sequences stripped while line
+/// structure survives. `buf` must hold `rendered.len`; returns the used
+/// prefix.
+fn filterDocument(rendered: []const u8, buf: []u8) []const u8 {
+    return viewport.stripControls(rendered, "\n\t", buf);
+}
+
 const record = @import("record.zig");
 
 // --- pure-view tests ---------------------------------------------------------
@@ -710,4 +725,13 @@ test "transcriptPath refuses a stem that does not fit" {
     // A stem that fits still resolves to the sibling path.
     const path = transcriptPath("recordings", "20260826-143000", &buf).?;
     try std.testing.expectEqualStrings("recordings/20260826-143000.md", path);
+}
+
+test "playback non-interactive document is filtered" {
+    var buf: [128]u8 = undefined;
+    // The document's OSC/escape bytes are dropped; newlines and tabs stay.
+    try std.testing.expectEqualStrings(
+        "title]0;pwned\nbody\tkept",
+        filterDocument("title\x1b]0;pwned\x07\nbody\tkept", &buf),
+    );
 }

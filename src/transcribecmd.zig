@@ -330,7 +330,10 @@ fn refineTranscript(
     defer gpa.free(runner.bin_path);
 
     var tpl_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const templates_dir = llm.templatesDirPath(config_dir, &tpl_buf).?;
+    const templates_dir = llm.templatesDirPath(config_dir, &tpl_buf) orelse {
+        ui.print(io, "refine: ignorado (sem diretório de templates)\n");
+        return;
+    };
     llm.materializeTemplates(io, templates_dir);
 
     // Customized template wins; the embedded copy covers missing/read-only.
