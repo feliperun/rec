@@ -29,10 +29,15 @@ pub const Release = struct {
     version: []u8,
     /// browser_download_url of this platform's asset.
     url: []u8,
+    /// browser_download_url of the `<artifact>.sha256` sibling asset the
+    /// release workflow publishes. Required: a release without it is not
+    /// offered as an update, so an unverifiable binary is never installed.
+    checksum_url: []u8,
 
     pub fn deinit(release: *Release, gpa: std.mem.Allocator) void {
         gpa.free(release.version);
         gpa.free(release.url);
+        gpa.free(release.checksum_url);
         release.* = undefined;
     }
 };
@@ -120,7 +125,7 @@ fn checkAndApply(io: std.Io, gpa: std.mem.Allocator, version_out: []u8, verbose:
         .lt => {},
     }
 
-    if (!apply(io, gpa, r.url, verbose)) return .apply_failed;
+    if (!apply(io, gpa, r.url, r.checksum_url, asset, verbose)) return .apply_failed;
     const version = version_out[0..@min(version_out.len, r.version.len)];
     @memcpy(version, r.version[0..version.len]);
     return .{ .updated = version };
@@ -162,8 +167,54 @@ pub fn assetName(buf: []u8) ?[]const u8 {
     return std.fmt.bufPrint(buf, "rec-{s}{s}", .{ platform, suffix }) catch null;
 }
 
-/// Extracts the tag and this platform's download URL from a GitHub
-/// latest-release body. Null when the shape is not what we publish.
+/// The only download prefix the updater trusts: the release assets this
+/// project itself publishes. The release JSON is unauthenticated input, so a
+/// rogue response must not be able to redirect the updater to another host or
+/// scheme.
+const trusted_download_prefix = "https://github.com/feliperun/rec/releases/download/";
+
+pub fn isTrustedDownloadUrl(url: []const u8) bool {
+    return std.mem.startsWith(u8, url, trusted_download_prefix);
+}
+
+/// Parses the `sha256sum` text the release workflow publishes as
+/// `<artifact>.sha256`: exactly `<64 lowercase hex><two spaces><artifact>`,
+/// with an optional trailing newline. Returns false on any other shape.
+pub fn parseChecksumText(text: []const u8, artifact: []const u8, out: *[32]u8) bool {
+    const line = std.mem.trimEnd(u8, text, "\n");
+    if (line.len != 64 + 2 + artifact.len) return false;
+    const hex = line[0..64];
+    for (hex) |c| {
+        if (!std.ascii.isDigit(c) and !std.ascii.isLower(c)) return false;
+    }
+    if (!std.mem.eql(u8, line[64..66], "  ")) return false;
+    if (!std.mem.eql(u8, line[66..], artifact)) return false;
+    _ = std.fmt.hexToBytes(out, hex) catch return false;
+    return true;
+}
+
+/// True when `text` is a valid checksum asset for `artifact` whose digest
+/// matches the SHA-256 of `data`. Any parse failure counts as a mismatch.
+pub fn checksumMatches(text: []const u8, artifact: []const u8, data: []const u8) bool {
+    var expected: [32]u8 = undefined;
+    if (!parseChecksumText(text, artifact, &expected)) return false;
+    var actual: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(data, &actual, .{});
+    return std.mem.eql(u8, &expected, &actual);
+}
+
+/// Exclusive creation flags for the update temp file: the file must not
+/// already exist, so a planted symlink (or a stale leftover) at the
+/// predictable path makes the update fail loudly instead of being followed
+/// or clobbered.
+pub fn tempCreateOptions() std.Io.Dir.CreateFileOptions {
+    return .{ .exclusive = true, .truncate = false };
+}
+
+/// Extracts the tag, this platform's download URL, and the matching
+/// `<asset>.sha256` URL from a GitHub latest-release body. Null when the
+/// shape is not what we publish, when the checksum sibling is absent, or when
+/// either URL points anywhere but the project's own release assets.
 pub fn extractRelease(gpa: std.mem.Allocator, body: []const u8, asset: []const u8) ?Release {
     const parsed = std.json.parseFromSlice(std.json.Value, gpa, body, .{}) catch return null;
     defer parsed.deinit();
@@ -179,25 +230,46 @@ pub fn extractRelease(gpa: std.mem.Allocator, body: []const u8, asset: []const u
         .array => |a| a,
         else => return null,
     };
+
+    var checksum_name_buf: [128]u8 = undefined;
+    const checksum_name = std.fmt.bufPrint(&checksum_name_buf, "{s}.sha256", .{asset}) catch return null;
+
+    var artifact_url: ?[]const u8 = null;
+    var checksum_url: ?[]const u8 = null;
     for (assets.items) |item| {
         if (item != .object) continue;
         const name = switch (item.object.get("name") orelse continue) {
             .string => |s| s,
             else => continue,
         };
-        if (!std.mem.eql(u8, name, asset)) continue;
-        const url = switch (item.object.get("browser_download_url") orelse continue) {
+        const slot = if (std.mem.eql(u8, name, asset))
+            &artifact_url
+        else if (std.mem.eql(u8, name, checksum_name))
+            &checksum_url
+        else
+            continue;
+        const link = switch (item.object.get("browser_download_url") orelse continue) {
             .string => |s| s,
             else => continue,
         };
-        const version = gpa.dupe(u8, if (tag[0] == 'v') tag[1..] else tag) catch return null;
-        const url_copy = gpa.dupe(u8, url) catch {
-            gpa.free(version);
-            return null;
-        };
-        return .{ .version = version, .url = url_copy };
+        if (!isTrustedDownloadUrl(link)) return null;
+        slot.* = link;
     }
-    return null;
+
+    const url = artifact_url orelse return null;
+    const sum_url = checksum_url orelse return null;
+
+    const version = gpa.dupe(u8, if (tag[0] == 'v') tag[1..] else tag) catch return null;
+    const url_copy = gpa.dupe(u8, url) catch {
+        gpa.free(version);
+        return null;
+    };
+    const checksum_copy = gpa.dupe(u8, sum_url) catch {
+        gpa.free(version);
+        gpa.free(url_copy);
+        return null;
+    };
+    return .{ .version = version, .url = url_copy, .checksum_url = checksum_copy };
 }
 
 // --- network -----------------------------------------------------------------
@@ -231,12 +303,15 @@ fn fetch(io: std.Io, gpa: std.mem.Allocator, url: []const u8, timeout_s: u32) ?[
     return result.stdout;
 }
 
-/// Downloads `url` beside the running executable and atomically replaces it:
-/// a plain rename on POSIX, where the running image keeps its inode; on
-/// Windows the running exe steps aside as `.old` first (renaming a running
-/// image is allowed; deleting it is not) and a stale `.old` from a previous
-/// update is removed before the dance.
-fn apply(io: std.Io, gpa: std.mem.Allocator, url: []const u8, verbose: bool) bool {
+/// Downloads `url` beside the running executable, verifies the bytes against
+/// the release's `<artifact>.sha256` sibling, and only then atomically
+/// replaces the running image: a plain rename on POSIX, where the running
+/// image keeps its inode; on Windows the running exe steps aside as `.old`
+/// first (renaming a running image is allowed; deleting it is not) and a
+/// stale `.old` from a previous update is removed before the dance. Any
+/// verification failure deletes the temp file and leaves the executable
+/// untouched.
+fn apply(io: std.Io, gpa: std.mem.Allocator, url: []const u8, checksum_url: []const u8, artifact: []const u8, verbose: bool) bool {
     var exe_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const exe_len = std.process.executablePath(io, &exe_buf) catch return false;
     const exe = exe_buf[0..exe_len];
@@ -247,11 +322,19 @@ fn apply(io: std.Io, gpa: std.mem.Allocator, url: []const u8, verbose: bool) boo
     var old_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const old = std.fmt.bufPrint(&old_buf, "{s}.old", .{exe}) catch return false;
 
-    // Leftovers of an interrupted previous update must not block this one.
-    std.Io.Dir.cwd().deleteFile(io, tmp) catch {};
     if (builtin.os.tag == .windows) std.Io.Dir.cwd().deleteFile(io, old) catch {};
 
-    if (!downloadTo(io, gpa, url, tmp, verbose)) return false;
+    // Create the temp file exclusively before curl touches it: a pre-existing
+    // file or symlink (however it got there) fails the update loudly instead
+    // of being followed or clobbered.
+    var tmp_file = std.Io.Dir.cwd().createFile(io, tmp, tempCreateOptions()) catch {
+        if (verbose) print(io, "Já existe um arquivo temporário de atualização; remova-o e tente de novo.\n");
+        return false;
+    };
+    tmp_file.close(io);
+
+    if (!downloadTo(io, gpa, url, tmp, verbose)) return fail(io, tmp);
+    if (!verifyDownload(io, gpa, checksum_url, artifact, tmp, verbose)) return fail(io, tmp);
 
     if (builtin.os.tag != .windows) {
         // curl writes 0644 through the umask; the replacement must stay
@@ -274,6 +357,29 @@ fn apply(io: std.Io, gpa: std.mem.Allocator, url: []const u8, verbose: bool) boo
         return fail(io, tmp);
     }
     std.Io.Dir.cwd().deleteFile(io, old) catch {};
+    return true;
+}
+
+/// Fetches the release's `<artifact>.sha256` asset and compares its digest
+/// with the SHA-256 of the freshly downloaded temp file. Missing asset,
+/// fetch failure, unparseable digest, and mismatch are all hard failures.
+fn verifyDownload(io: std.Io, gpa: std.mem.Allocator, checksum_url: []const u8, artifact: []const u8, tmp: []const u8, verbose: bool) bool {
+    const text = fetch(io, gpa, checksum_url, 15) orelse {
+        if (verbose) print(io, "Não consegui baixar a soma de verificação da versão.\n");
+        return false;
+    };
+    defer gpa.free(text);
+
+    const bytes = std.Io.Dir.cwd().readFileAlloc(io, tmp, gpa, .unlimited) catch {
+        if (verbose) print(io, "Não consegui ler o arquivo baixado para verificar.\n");
+        return false;
+    };
+    defer gpa.free(bytes);
+
+    if (!checksumMatches(text, artifact, bytes)) {
+        if (verbose) print(io, "A soma de verificação não confere; atualização abortada.\n");
+        return false;
+    }
     return true;
 }
 
@@ -388,8 +494,9 @@ test "assetName matches the published artifact for the running platform" {
     try std.testing.expectEqualStrings(expected, name);
 }
 
-// Shaped like the real release body: one asset per supported platform, so
-// the platform-matched lookup works on every test runner.
+// Shaped like the real release body: the artifact plus its `.sha256` sibling
+// for every supported platform, so the matched lookups work on every test
+// runner.
 const fixture_body =
     \\{
     \\  "url": "https://api.github.com/repos/feliperun/rec/releases/1",
@@ -401,20 +508,40 @@ const fixture_body =
     \\      "browser_download_url": "https://github.com/feliperun/rec/releases/download/v1.8.0/rec-macos-arm64"
     \\    },
     \\    {
+    \\      "name": "rec-macos-arm64.sha256",
+    \\      "browser_download_url": "https://github.com/feliperun/rec/releases/download/v1.8.0/rec-macos-arm64.sha256"
+    \\    },
+    \\    {
     \\      "name": "rec-macos-intel",
     \\      "browser_download_url": "https://github.com/feliperun/rec/releases/download/v1.8.0/rec-macos-intel"
+    \\    },
+    \\    {
+    \\      "name": "rec-macos-intel.sha256",
+    \\      "browser_download_url": "https://github.com/feliperun/rec/releases/download/v1.8.0/rec-macos-intel.sha256"
     \\    },
     \\    {
     \\      "name": "rec-linux-x64",
     \\      "browser_download_url": "https://github.com/feliperun/rec/releases/download/v1.8.0/rec-linux-x64"
     \\    },
     \\    {
+    \\      "name": "rec-linux-x64.sha256",
+    \\      "browser_download_url": "https://github.com/feliperun/rec/releases/download/v1.8.0/rec-linux-x64.sha256"
+    \\    },
+    \\    {
     \\      "name": "rec-linux-arm64",
     \\      "browser_download_url": "https://github.com/feliperun/rec/releases/download/v1.8.0/rec-linux-arm64"
     \\    },
     \\    {
+    \\      "name": "rec-linux-arm64.sha256",
+    \\      "browser_download_url": "https://github.com/feliperun/rec/releases/download/v1.8.0/rec-linux-arm64.sha256"
+    \\    },
+    \\    {
     \\      "name": "rec-windows-x64.exe",
     \\      "browser_download_url": "https://github.com/feliperun/rec/releases/download/v1.8.0/rec-windows-x64.exe"
+    \\    },
+    \\    {
+    \\      "name": "rec-windows-x64.exe.sha256",
+    \\      "browser_download_url": "https://github.com/feliperun/rec/releases/download/v1.8.0/rec-windows-x64.exe.sha256"
     \\    }
     \\  ]
     \\}
@@ -429,6 +556,7 @@ test "extractRelease picks the platform asset and strips the tag's v" {
     defer release.deinit(gpa);
     try std.testing.expectEqualStrings("1.8.0", release.version);
     try std.testing.expect(std.mem.endsWith(u8, release.url, asset));
+    try std.testing.expect(std.mem.endsWith(u8, release.checksum_url, ".sha256"));
 }
 
 test "extractRelease answers null for unusable bodies" {
@@ -444,4 +572,59 @@ test "extractRelease answers null for unusable bodies" {
         \\{"tag_name":"v1.8.0","assets":[{"name":"rec-other","browser_download_url":"https://x/y"}]}
     ;
     try std.testing.expect(extractRelease(gpa, wrong_platform, asset) == null);
+    // An artifact without its checksum sibling is unverifiable: no update.
+    const no_checksum =
+        \\{"tag_name":"v1.8.0","assets":[{"name":"rec-linux-x64","browser_download_url":"https://github.com/feliperun/rec/releases/download/v1.8.0/rec-linux-x64"}]}
+    ;
+    try std.testing.expect(extractRelease(gpa, no_checksum, asset) == null);
+}
+
+test "update checksum text parses and rejects a mismatch" {
+    const data = "release artifact bytes";
+    var digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(data, &digest, .{});
+    const hex = std.fmt.bytesToHex(digest, .lower);
+
+    var text_buf: [128]u8 = undefined;
+    const text = std.fmt.bufPrint(&text_buf, "{s}  rec-linux-x64\n", .{&hex}) catch return error.TestUnexpectedResult;
+
+    var parsed: [32]u8 = undefined;
+    try std.testing.expect(parseChecksumText(text, "rec-linux-x64", &parsed));
+    try std.testing.expectEqualSlices(u8, &digest, &parsed);
+    try std.testing.expect(checksumMatches(text, "rec-linux-x64", data));
+
+    // A different payload, a different artifact name, malformed text, and
+    // uppercase hex all fail closed instead of installing.
+    try std.testing.expect(!checksumMatches(text, "rec-linux-x64", "tampered bytes"));
+    try std.testing.expect(!checksumMatches(text, "rec-linux-arm64", data));
+    try std.testing.expect(!checksumMatches("not a checksum", "rec-linux-x64", data));
+    try std.testing.expect(!checksumMatches("", "rec-linux-x64", data));
+
+    const upper_hex = std.fmt.bytesToHex(digest, .upper);
+    var upper_buf: [128]u8 = undefined;
+    const upper = std.fmt.bufPrint(&upper_buf, "{s}  rec-linux-x64\n", .{&upper_hex}) catch return error.TestUnexpectedResult;
+    try std.testing.expect(!checksumMatches(upper, "rec-linux-x64", data));
+}
+
+test "update rejects an untrusted download url" {
+    try std.testing.expect(isTrustedDownloadUrl("https://github.com/feliperun/rec/releases/download/v1.8.0/rec-linux-x64"));
+    try std.testing.expect(!isTrustedDownloadUrl("http://github.com/feliperun/rec/releases/download/v1.8.0/rec-linux-x64"));
+    try std.testing.expect(!isTrustedDownloadUrl("https://evil.example/rec-linux-x64"));
+    try std.testing.expect(!isTrustedDownloadUrl("https://github.com/feliperun/rec/releases/download-evil/rec-linux-x64"));
+
+    var name_buf: [64]u8 = undefined;
+    const asset = assetName(&name_buf).?;
+    var body_buf: [1024]u8 = undefined;
+    const body = std.fmt.bufPrint(&body_buf,
+        \\{{"tag_name":"v1.8.0","assets":[
+        \\  {{"name":"{s}","browser_download_url":"https://evil.example/{s}"}},
+        \\  {{"name":"{s}.sha256","browser_download_url":"https://github.com/feliperun/rec/releases/download/v1.8.0/{s}.sha256"}}
+        \\]}}
+    , .{ asset, asset, asset, asset }) catch return error.TestUnexpectedResult;
+    try std.testing.expect(extractRelease(std.testing.allocator, body, asset) == null);
+}
+
+test "update temp path must be created exclusively" {
+    const options = tempCreateOptions();
+    try std.testing.expect(options.exclusive);
 }

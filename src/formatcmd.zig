@@ -92,7 +92,10 @@ pub fn run(
         return 1;
     };
     var tpl_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const templates_dir = llm.templatesDirPath(config_dir, &tpl_buf).?;
+    const templates_dir = llm.templatesDirPath(config_dir, &tpl_buf) orelse {
+        ui.print(io, "format: caminho de configuração longo demais\n");
+        return 1;
+    };
 
     // Defaults must exist before resolution so a fresh install finds `meeting`.
     llm.materializeTemplates(io, templates_dir);
@@ -211,8 +214,10 @@ pub fn run(
     const out_path: []const u8 = blk: {
         if (fa.out) |p| {
             // Overwriting the input with the transformed text is never what
-            // "save to this path" means.
-            if (std.mem.eql(u8, p, source_path)) {
+            // "save to this path" means. Compare resolved paths so a different
+            // spelling of the source (./x.md, absolute, symlink) is still
+            // recognized as the same file.
+            if (outTargetsSource(io, p, source_path)) {
                 ui.print(io, "format: --out não pode ser o próprio arquivo de entrada\n");
                 return 1;
             }
@@ -253,6 +258,20 @@ pub fn run(
     ui.print(io, "\n");
     ui.open(io, gpa, out_path);
     return 0;
+}
+
+/// True when `out` names the same filesystem object as `source`, so a
+/// different spelling of the same path (`./x.md`, a repeated slash, the
+/// absolute form) still trips the overwrite guard. Both sides are canonicalized
+/// with the filesystem; a nonexistent `out` cannot be the source file, so only
+/// an exact string match counts for it.
+fn outTargetsSource(io: std.Io, out: []const u8, source: []const u8) bool {
+    if (std.mem.eql(u8, out, source)) return true;
+    var out_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const out_len = std.Io.Dir.cwd().realPathFile(io, out, &out_buf) catch return false;
+    var src_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const src_len = std.Io.Dir.cwd().realPathFile(io, source, &src_buf) catch return false;
+    return std.mem.eql(u8, out_buf[0..out_len], src_buf[0..src_len]);
 }
 
 /// Selection semantics: '/' anywhere means a real filesystem path (relative
@@ -365,4 +384,31 @@ test "parse format args rejects bad usage" {
             .ok => false,
         });
     }
+}
+
+test "format out refuses the same file spelled differently" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var name_buf: [64]u8 = undefined;
+    var seed: [4]u8 = undefined;
+    io.random(&seed);
+    const name = try std.fmt.bufPrint(&name_buf, "rec-format-out-{x}.md", .{std.mem.readInt(u32, &seed, .little)});
+    defer std.Io.Dir.cwd().deleteFile(io, name) catch {};
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = name, .data = "x" });
+
+    var abs_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const abs_len = try std.Io.Dir.cwd().realPathFile(io, name, &abs_buf);
+    const abs = abs_buf[0..abs_len];
+
+    var dotted_buf: [80]u8 = undefined;
+    const dotted = try std.fmt.bufPrint(&dotted_buf, "./{s}", .{name});
+
+    // The same file through its bare, ./-prefixed and absolute spellings is
+    // refused; a genuinely different target is allowed.
+    try std.testing.expect(outTargetsSource(io, name, abs));
+    try std.testing.expect(outTargetsSource(io, dotted, abs));
+    try std.testing.expect(outTargetsSource(io, abs, abs));
+    try std.testing.expect(!outTargetsSource(io, "outro.md", abs));
 }

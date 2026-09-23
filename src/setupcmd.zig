@@ -353,6 +353,14 @@ pub fn readLine(buf: []u8) ?[]const u8 {
             buf[n] = byte[0];
             n += 1;
         }
+    } else {
+        // The buffer filled before the line ended, so the rest of the line is
+        // still queued on stdin. Drain it through the newline (or EOF) so the
+        // next prompt reads a fresh line instead of leftover bytes.
+        var discarded: [1]u8 = undefined;
+        while (keys.readByte(&discarded[0])) {
+            if (discarded[0] == '\n') break;
+        }
     }
     return buf[0..n];
 }
@@ -370,4 +378,34 @@ fn parseChoice(line: []const u8, max: usize) ?usize {
 
 fn eql(a: []const u8, b: []const u8) bool {
     return std.mem.eql(u8, a, b);
+}
+
+test "setup readLine drains an over-length line" {
+    if (@import("builtin").os.tag == .windows) return error.SkipZigTest;
+    const C = struct {
+        extern "c" fn pipe(fds: *[2]std.posix.fd_t) c_int;
+        extern "c" fn dup(fd: std.posix.fd_t) std.posix.fd_t;
+        extern "c" fn dup2(oldfd: std.posix.fd_t, newfd: std.posix.fd_t) c_int;
+        extern "c" fn close(fd: std.posix.fd_t) c_int;
+        extern "c" fn write(fd: std.posix.fd_t, data: [*]const u8, size: usize) isize;
+    };
+
+    var fds: [2]std.posix.fd_t = undefined;
+    try std.testing.expect(C.pipe(&fds) == 0);
+    defer _ = C.close(fds[0]);
+    defer _ = C.close(fds[1]);
+    const saved = C.dup(0);
+    defer _ = C.close(saved);
+    defer _ = C.dup2(saved, 0);
+    try std.testing.expect(C.dup2(fds[0], 0) == 0);
+
+    // A line that exactly fills the 8-byte buffer, then a fresh line. The
+    // first call must discard the rest of its line (the newline included) so
+    // the second call reads "depois" rather than a leftover terminator.
+    const input = "abcdefgh\ndepois\n";
+    try std.testing.expect(C.write(fds[1], input, input.len) == input.len);
+
+    var buf: [8]u8 = undefined;
+    try std.testing.expectEqualStrings("abcdefgh", readLine(&buf).?);
+    try std.testing.expectEqualStrings("depois", readLine(&buf).?);
 }

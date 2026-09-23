@@ -42,7 +42,7 @@ pub const Document = struct {
                 col = 0;
                 continue;
             }
-            if (token[0] < 32 and token[0] != '\t') continue;
+            if ((token[0] < 32 or token[0] == 127) and token[0] != '\t') continue;
             const cells = if (token[0] == '\t') 4 - col % 4 else cellWidth(token);
             if (col + cells > self.width and col > 0) {
                 try self.newline(gpa, active, true);
@@ -78,6 +78,27 @@ pub fn tokenLen(text: []const u8) usize {
         return text.len;
     }
     return @min(std.unicode.utf8ByteSequenceLength(text[0]) catch 1, text.len);
+}
+
+/// Copies `text` into `buf`, dropping every control byte (`< 32` or 127) that
+/// `deck.cleanTitle` drops and every escape sequence, except the structural
+/// bytes listed in `keep`. Multi-byte UTF-8 sequences are copied whole, and
+/// the copy stops at `buf.len`. Returns the used prefix of `buf`.
+pub fn stripControls(text: []const u8, keep: []const u8, buf: []u8) []const u8 {
+    var i: usize = 0;
+    var n: usize = 0;
+    while (i < text.len) {
+        const len = tokenLen(text[i..]);
+        const token = text[i..][0..len];
+        i += len;
+        if (token[0] < 32 or token[0] == 127) {
+            if (std.mem.indexOfScalar(u8, keep, token[0]) == null) continue;
+        }
+        if (n + len > buf.len) break;
+        @memcpy(buf[n..][0..len], token);
+        n += len;
+    }
+    return buf[0..n];
 }
 
 fn cellWidth(token: []const u8) usize {
@@ -158,4 +179,15 @@ test "indexed wrapping preserves wide glyphs and style on each row" {
     try std.testing.expect(std.mem.startsWith(u8, doc.line(1), "\x1b[1mcd"));
     try std.testing.expectEqualStrings("last", doc.line(2));
     try std.testing.expectEqualStrings("ab", clipped("ab界", 3));
+}
+
+test "viewport strips DEL like deck.cleanTitle" {
+    var doc = Document{};
+    defer doc.deinit(std.testing.allocator);
+    try doc.set(std.testing.allocator, "ab\x7fcd", 80);
+    try std.testing.expectEqualStrings("abcd", doc.line(0));
+
+    // The shared helper keeps the same DEL/control class deck.cleanTitle uses.
+    var buf: [16]u8 = undefined;
+    try std.testing.expectEqualStrings("abcd", stripControls("ab\x7fcd", "", &buf));
 }
