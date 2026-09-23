@@ -1,5 +1,12 @@
 # Changelog
 
+## [3.1.2](https://github.com/feliperun/rec/compare/v3.1.1...v3.1.2) (2026-09-23)
+
+
+### Bug Fixes
+
+* correct all 22 audit findings and close their residuals ([322e215](https://github.com/feliperun/rec/commit/322e2154bd9302a93a23ac33ba95e0a5aaa4ae48))
+
 ## [3.1.1](https://github.com/feliperun/rec/compare/v3.1.0...v3.1.1) (2026-09-11)
 
 
