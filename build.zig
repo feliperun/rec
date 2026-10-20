@@ -30,6 +30,11 @@ pub fn build(b: *std.Build) void {
     });
     exe_mod.addIncludePath(b.path("vendor"));
 
+    // libopus decodes AIREC `.ops` recordings for `rec import` (see
+    // docs/adr/0021); built from source by zig for every target.
+    const opus = b.dependency("opus", .{ .target = target, .optimize = optimize });
+    exe_mod.linkLibrary(staticArtifact(opus, "opus"));
+
     // Deterministic E2E recordings without opening a physical microphone.
     if (b.option(bool, "silent-input", "Use miniaudio's null backend for E2E tests") orelse false) {
         exe_mod.addCMacro("MA_ENABLE_ONLY_SPECIFIC_BACKENDS", "1");
@@ -41,6 +46,7 @@ pub fn build(b: *std.Build) void {
     const build_info = b.addOptions();
     build_info.addOption([]const u8, "version", zon.version);
     build_info.addOption([]const u8, "listen_base", b.option([]const u8, "test-listen-base", "Local transcription server URL for E2E tests") orelse "https://api.deepgram.com/v1/listen?");
+    build_info.addOption(bool, "fake_airec", b.option(bool, "fake-airec", "Serve AIREC sync from a directory instead of Bluetooth (E2E tests)") orelse false);
     exe_mod.addOptions("build_info", build_info);
 
     // CoreAudio's frameworks exist (and are needed) only on macOS; the M4A
@@ -56,6 +62,13 @@ pub fn build(b: *std.Build) void {
         exe_mod.linkFramework("CoreFoundation", .{});
         exe_mod.linkFramework("CoreAudio", .{});
         exe_mod.linkFramework("AudioToolbox", .{});
+        // Bluetooth device sync drives CoreBluetooth through the Objective-C
+        // runtime (src/objc.zig, docs/adr/0022).
+        exe_mod.linkFramework("Foundation", .{});
+        exe_mod.linkFramework("CoreBluetooth", .{});
+        // libobjc.tbd sits in the SDK's usr/lib; the sysroot prefixes this path.
+        exe_mod.addLibraryPath(.{ .cwd_relative = "/usr/lib" });
+        exe_mod.linkSystemLibrary("objc", .{});
     } else if (target.result.os.tag == .linux) {
         exe_mod.linkSystemLibrary("m", .{});
         exe_mod.linkSystemLibrary("pthread", .{});
@@ -82,4 +95,16 @@ pub fn build(b: *std.Build) void {
     const run_tests = b.addRunArtifact(tests);
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_tests.step);
+}
+
+/// The static library `name` a dependency installs. `Dependency.artifact`
+/// panics when a package installs a static and a shared library under one
+/// name, as the opus package does; rec ships one self-contained binary.
+fn staticArtifact(dep: *std.Build.Dependency, name: []const u8) *std.Build.Step.Compile {
+    for (dep.builder.install_tls.step.dependencies.items) |step| {
+        const install = step.cast(std.Build.Step.InstallArtifact) orelse continue;
+        const lib = install.artifact;
+        if (std.mem.eql(u8, lib.name, name) and lib.linkage == .static) return lib;
+    }
+    std.debug.panic("dependency installs no static library '{s}'", .{name});
 }

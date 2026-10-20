@@ -3,6 +3,7 @@ const capture = @import("capture.zig");
 const keys = @import("keys.zig");
 const library = @import("library.zig");
 const live = @import("live.zig");
+const localtime = @import("localtime.zig");
 const ruler = @import("ruler.zig");
 const style = @import("style.zig");
 const waveform = @import("waveform.zig");
@@ -390,62 +391,18 @@ fn installSigintHandler() void {
     std.posix.sigaction(std.posix.SIG.INT, &act, null);
 }
 
-// libc time functions (libc is already linked for miniaudio): local-time
-// naming without dragging in tz parsing.
-const Tm = extern struct {
-    sec: c_int,
-    min: c_int,
-    hour: c_int,
-    mday: c_int,
-    mon: c_int,
-    year: c_int,
-    wday: c_int,
-    yday: c_int,
-    isdst: c_int,
-    gmtoff: c_long,
-    zone: ?[*:0]const u8,
-};
-
-extern "c" fn time(now: ?*i64) i64;
-extern "c" fn localtime_r(now: *const i64, result: *Tm) ?*Tm;
-// Windows CRT: no _r functions — localtime fills a static buffer (fine;
-// the record loop is single-threaded around this call).
-extern "c" fn localtime(now: *const i64) ?*Tm;
-
-fn localTime(now: *const i64, out: *Tm) bool {
-    if (@import("builtin").os.tag == .windows) {
-        const t = localtime(now) orelse return false;
-        out.* = t.*;
-        return true;
-    }
-    return localtime_r(now, out) != null;
-}
-
 /// "YYYYMMDD-HHMMSS" (15 bytes) from the local wall clock.
 fn localTimestamp(out: *[15]u8) void {
-    const now: i64 = time(null);
-    var tm: Tm = undefined;
-    if (!localTime(&now, &tm)) {
-        @memcpy(out, "19700101-000000");
-        return;
-    }
-    put4(out[0..4], @intCast(@max(tm.year + 1900, 0)));
-    put2(out[4..6], @intCast(tm.mon + 1));
-    put2(out[6..8], @intCast(tm.mday));
+    var digits: [14]u8 = undefined;
+    localtime.digits(&digits);
+    @memcpy(out[0..8], digits[0..8]);
     out[8] = '-';
-    put2(out[9..11], @intCast(tm.hour));
-    put2(out[11..13], @intCast(tm.min));
-    put2(out[13..15], @intCast(tm.sec));
+    @memcpy(out[9..15], digits[8..14]);
 }
 
 fn put2(buf: []u8, v: u32) void {
     buf[0] = '0' + @as(u8, @intCast((v % 100) / 10));
     buf[1] = '0' + @as(u8, @intCast(v % 10));
-}
-
-fn put4(buf: []u8, v: u32) void {
-    put2(buf[0..2], v / 100);
-    put2(buf[2..4], v % 100);
 }
 
 /// "YYYYMMDD-HHMMSS" plus room for the longest `-NNN` suffix the bounded

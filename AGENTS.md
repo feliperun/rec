@@ -163,6 +163,25 @@ file — keep appending.
   recording test can catch this. The −40 dBFS `LevelTracker` warning only
   fires after `audibility_min_sec`, so short clips look fine.
 
+- **The AIREC recorder stays mute until the session is opened the app's way.**
+  Every command before `01` is ignored without an error, and with only `01`
+  sent, a button press while connected records nothing and raises no event.
+  `session.zig` replays the vendor app's whole opening sequence (`opening`
+  and `after_clock`) before listening; do not trim it to the steps that look
+  necessary. See [ADR 0022](docs/adr/0022-device-integrations-and-bluetooth-sync.md)
+  and `docs/devices/airec-protocol.md`.
+- **With the macOS sysroot set, library paths are sysroot-relative.**
+  `libobjc.tbd` lives in the SDK's `usr/lib`; `build.zig` adds `/usr/lib`,
+  which zig prefixes with the SDK. An absolute SDK path gets prefixed twice
+  and the link fails with "unable to find dynamic system library 'objc'".
+
+- **Windows CRT `_open` defaults to text mode.** `_open(path, 0)` ends a
+  read at the first 0x1a byte, so `wav.readWholeFile` returned 572 of 12,080
+  bytes of an `.ops` file and the import reported 00:00; macOS and Linux
+  never show it. Every CRT open of audio passes `_O_BINARY` (0x8000); the
+  "readWholeFile reads binary bytes past a Ctrl-Z" test in `src/wav.zig`
+  and `scripts/e2e_airec.py` on the Windows runner guard it.
+
 - **A DC offset is not audible band energy.** The display's windowed band-pass
   bank must remove each channel's mean before restarting the filters, or every
   window invents a low-frequency transient. Keep the steady-offset regression in

@@ -206,7 +206,8 @@ fn openNew(path: [*:0]const u8) Error!c_int {
 }
 
 fn openReadOnly(path: [*:0]const u8) c_int {
-    if (is_windows) return _open(path, 0); // _O_RDONLY
+    // _O_RDONLY | _O_BINARY: text mode would stop at the first 0x1a byte.
+    if (is_windows) return _open(path, 0x8000);
     return open(path, 0);
 }
 
@@ -367,6 +368,20 @@ test "encode writes a WAV whose parse reads the exact audio back" {
     try std.testing.expectEqual(@as(u32, 48000), parsed.sample_rate);
     try std.testing.expectEqual(@as(u16, 2), parsed.channels);
     try std.testing.expectEqualSlices(u8, pcm.items, parsed.pcm);
+}
+
+test "readWholeFile reads binary bytes past a Ctrl-Z" {
+    var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path = testPath(&path_buf, ".ctrlz.bin");
+    defer unlinkZ(path);
+
+    // The Windows CRT's text mode ends a read at 0x1a and folds \r\n; a
+    // binary file must come back whole.
+    const bytes = [_]u8{ 0x4b, 0x41, 0x1a, 0x00, '\r', '\n', 0x1a, 0xff };
+    try std.testing.expect(writeFileZ(path, &bytes));
+    const image = try readWholeFile(std.testing.allocator, std.mem.sliceTo(path, 0));
+    defer std.testing.allocator.free(image);
+    try std.testing.expectEqualSlices(u8, &bytes, image);
 }
 
 test "stream encoder finalizes a recording written in chunks" {

@@ -3,3 +3,5 @@
 zig-out/
 recordings/
 __pycache__/
+zig-pkg/
+.tmp/
