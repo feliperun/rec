@@ -19,9 +19,9 @@ pub const reply_timeout_ms = 3000;
 pub const data_timeout_ms = 15000;
 
 /// The vendor app's opening sequence after `01`, with the reply each step
-/// waits for (null: none comes). Which steps put the recorder in connected
-/// mode is untested; without them a button press while connected records
-/// nothing and raises no event, so the sequence is replayed whole.
+/// waits for (null: none comes). Without it a button press while connected
+/// records nothing and raises no event; which steps matter is untested, so
+/// it is replayed whole.
 const Step = struct { cmd: u8, args: []const u8 = &.{}, reply: ?u8 };
 const opening = [_]Step{
     .{ .cmd = 0x20, .reply = 0x20 },
@@ -34,7 +34,9 @@ const opening = [_]Step{
     .{ .cmd = 0x36, .reply = null },
     .{ .cmd = protocol.Code.list, .reply = protocol.Code.list_end },
 };
-const after_clock = [_]Step{
+/// After every list and download the app sends `02 <clock>` and then these.
+/// Whether the recorder needs them there is untested; rec does the same.
+const rearm_tail = [_]Step{
     .{ .cmd = 0x69, .args = &.{0}, .reply = null },
     .{ .cmd = protocol.Code.get_clock, .reply = protocol.Code.get_clock },
     .{ .cmd = 0x66, .args = &.{0}, .reply = null },
@@ -51,11 +53,13 @@ pub fn Session(comptime Link: type) type {
 
         gpa: std.mem.Allocator,
         link: *Link,
+        /// The local time the recorder names recordings by.
+        clock: *const fn (*protocol.Name) void,
         /// Events that arrived while the session waited for something else.
         pending: std.ArrayList(Event) = .empty,
 
-        pub fn init(gpa: std.mem.Allocator, link: *Link) Self {
-            return .{ .gpa = gpa, .link = link };
+        pub fn init(gpa: std.mem.Allocator, link: *Link, clock: *const fn (*protocol.Name) void) Self {
+            return .{ .gpa = gpa, .link = link, .clock = clock };
         }
 
         pub fn deinit(self: *Self) void {
@@ -63,12 +67,20 @@ pub fn Session(comptime Link: type) type {
         }
 
         /// Opens the session; the recorder ignores every other command until
-        /// `01`. `clock` is the local time the recorder names recordings by.
-        pub fn open(self: *Self, clock: protocol.Name) Error!void {
+        /// `01`.
+        pub fn open(self: *Self) Error!void {
             try self.step(.{ .cmd = protocol.Code.open, .reply = protocol.Code.open });
             for (opening) |s| try self.step(s);
-            try self.step(.{ .cmd = protocol.Code.set_clock, .args = &clock, .reply = protocol.Code.set_clock });
-            for (after_clock) |s| try self.step(s);
+            try self.rearm();
+        }
+
+        /// Sets the clock and puts the recorder back into raising events,
+        /// as the app does after every list and download.
+        fn rearm(self: *Self) Error!void {
+            var now: protocol.Name = undefined;
+            self.clock(&now);
+            try self.step(.{ .cmd = protocol.Code.set_clock, .args = &now, .reply = protocol.Code.set_clock });
+            for (rearm_tail) |s| try self.step(s);
         }
 
         /// Every recording on the device, in the recorder's order. Caller
@@ -78,7 +90,10 @@ pub fn Session(comptime Link: type) type {
             var entries: std.ArrayList(protocol.Entry) = .empty;
             errdefer entries.deinit(self.gpa);
             while (try self.reply(reply_timeout_ms)) |r| {
-                if (r.code == protocol.Code.list_end) return entries.toOwnedSlice(self.gpa);
+                if (r.code == protocol.Code.list_end) {
+                    try self.rearm();
+                    return entries.toOwnedSlice(self.gpa);
+                }
                 if (r.code != protocol.Code.list) continue;
                 if (protocol.parseEntry(r.data)) |e| try entries.append(self.gpa, e);
             }
@@ -108,6 +123,7 @@ pub fn Session(comptime Link: type) type {
                 }
             }
             if (size == null or bytes.items.len != size.?) return error.Truncated;
+            try self.rearm();
             return bytes.toOwnedSlice(self.gpa);
         }
 
@@ -170,6 +186,10 @@ fn channel(index: usize) protocol.Channel {
 const Fake = @import("fake.zig").Fake;
 const TestSession = Session(Fake);
 
+fn testClock(out: *protocol.Name) void {
+    out.* = "20261020170000".*;
+}
+
 fn testFile(gpa: std.mem.Allocator, len: usize) ![]u8 {
     const bytes = try gpa.alloc(u8, len);
     for (bytes, 0..) |*b, i| b.* = @truncate(i *% 7);
@@ -180,10 +200,10 @@ test "opening replays the app's sequence and sets the clock" {
     const gpa = std.testing.allocator;
     var fake = Fake.init(gpa, &.{});
     defer fake.deinit();
-    var session = TestSession.init(gpa, &fake);
+    var session = TestSession.init(gpa, &fake, testClock);
     defer session.deinit();
 
-    try session.open("20261020170000".*);
+    try session.open();
     try std.testing.expectEqualStrings("20261020170000", &fake.clock.?);
     try std.testing.expect(fake.connected_mode);
 }
@@ -192,7 +212,7 @@ test "the recorder ignores commands until the session is open" {
     const gpa = std.testing.allocator;
     var fake = Fake.init(gpa, &.{});
     defer fake.deinit();
-    var session = TestSession.init(gpa, &fake);
+    var session = TestSession.init(gpa, &fake, testClock);
     defer session.deinit();
     try std.testing.expectError(error.Timeout, session.list());
 }
@@ -208,9 +228,9 @@ test "lists recordings and downloads one byte for byte" {
         .{ .name = "20250102130000".*, .bytes = b },
     });
     defer fake.deinit();
-    var session = TestSession.init(gpa, &fake);
+    var session = TestSession.init(gpa, &fake, testClock);
     defer session.deinit();
-    try session.open("20261020170000".*);
+    try session.open();
 
     const entries = try session.list();
     defer gpa.free(entries);
@@ -218,9 +238,12 @@ test "lists recordings and downloads one byte for byte" {
     try std.testing.expectEqualStrings("20250102130000", &entries[1].name);
     try std.testing.expectEqual(@as(u32, 600), entries[1].size);
 
+    try std.testing.expect(fake.connected_mode); // re-armed after the list
+
     const got = try session.download(entries[0].name);
     defer gpa.free(got);
     try std.testing.expectEqualSlices(u8, a, got);
+    try std.testing.expect(fake.connected_mode); // and after the download
 }
 
 test "a short download is an error, not a recording" {
@@ -230,9 +253,9 @@ test "a short download is an error, not a recording" {
     var fake = Fake.init(gpa, &.{.{ .name = "20250101120000".*, .bytes = a }});
     defer fake.deinit();
     fake.drop_data_after = 500;
-    var session = TestSession.init(gpa, &fake);
+    var session = TestSession.init(gpa, &fake, testClock);
     defer session.deinit();
-    try session.open("20261020170000".*);
+    try session.open();
     try std.testing.expectError(error.Truncated, session.download("20250101120000".*));
 }
 
@@ -242,9 +265,9 @@ test "events raised mid-download are kept, live audio is ignored" {
     defer gpa.free(a);
     var fake = Fake.init(gpa, &.{.{ .name = "20250101120000".*, .bytes = a }});
     defer fake.deinit();
-    var session = TestSession.init(gpa, &fake);
+    var session = TestSession.init(gpa, &fake, testClock);
     defer session.deinit();
-    try session.open("20261020170000".*);
+    try session.open();
 
     try fake.raise(protocol.Code.started, "20261020170100");
     try fake.live(&.{ 0x4b, 0x41, 0x02, 0x87 });

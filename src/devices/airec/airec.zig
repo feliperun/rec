@@ -201,7 +201,7 @@ fn sync(io: std.Io, gpa: std.mem.Allocator, ctx: ingest.Context, notes: bool) u8
     defer imported.deinit(gpa);
     const ok = blk: {
         defer link.close();
-        var session = Session.init(gpa, &link);
+        var session = Session.init(gpa, &link, localtime.digits);
         defer session.deinit();
         break :blk catchUp(io, gpa, &session, ctx, &imported);
     };
@@ -225,7 +225,7 @@ fn watch(io: std.Io, gpa: std.mem.Allocator, ctx: ingest.Context, notes: bool) u
             },
         };
         defer link.close();
-        var session = Session.init(gpa, &link);
+        var session = Session.init(gpa, &link, localtime.digits);
         defer session.deinit();
         follow(io, gpa, &session, ctx, notes);
         ingest.print(io, "The recorder disconnected.\n", .{});
@@ -259,10 +259,8 @@ fn follow(io: std.Io, gpa: std.mem.Allocator, session: *Session, ctx: ingest.Con
 /// Opens the session and fetches every recording the library lacks, oldest
 /// first. False when the recorder could not be read to the end.
 fn catchUp(io: std.Io, gpa: std.mem.Allocator, session: *Session, ctx: ingest.Context, out: *std.ArrayList(Imported)) bool {
-    var clock: protocol.Name = undefined;
-    localtime.digits(&clock);
     const entries = open: {
-        session.open(clock) catch |err| break :open err;
+        session.open() catch |err| break :open err;
         break :open session.list();
     } catch |err| {
         ingest.print(io, "device airec: {s}\n", .{sessionFailure(err)});

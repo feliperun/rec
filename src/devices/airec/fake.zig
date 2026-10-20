@@ -33,7 +33,8 @@ pub const Fake = struct {
     last: ?[]u8 = null,
     open: bool = false,
     clock: ?protocol.Name = null,
-    /// Set by the `66 00` that ends the app's opening sequence.
+    /// Set by `66 00`, cleared by a list or download, so tests can check the
+    /// session re-arms the recorder after both, as the vendor app does.
     connected_mode: bool = false,
     /// Data bytes served before a download stops short (tests only).
     drop_data_after: ?usize = null,
@@ -62,10 +63,14 @@ pub const Fake = struct {
         if (!self.open) return;
         switch (cmd) {
             protocol.Code.list => {
+                self.connected_mode = false;
                 for (self.files) |f| try self.reply(cmd, &entryBytes(f));
                 try self.reply(protocol.Code.list_end, &.{});
             },
-            protocol.Code.download => try self.serve(args),
+            protocol.Code.download => {
+                self.connected_mode = false;
+                try self.serve(args);
+            },
             protocol.Code.set_clock => {
                 self.clock = protocol.parseName(args);
                 try self.reply(cmd, &.{});
