@@ -8,6 +8,7 @@
 
 ```
 microphone ──miniaudio──▶ PCM frames in memory ──library.recording (platform format)──▶ .part ──rename──▶ ~/recordings/*
+AIREC recorder ──BLE (ble.zig) or .ops copy──▶ devices/airec ──libopus──▶ PCM ──devices/ingest──┘  (rec device airec …)
                                                                         │                          (macOS: .m4a · Linux/Windows: .wav)
                                    library.zig (scan, sort, table) ◀────┤
                                                                         │
@@ -43,6 +44,12 @@ microphone ──miniaudio──▶ PCM frames in memory ──library.recording
 | `src/library.zig` | Scans `~/recordings/`, sorts newest-first, formats table; hosts the `recording` facade — `ext`, streaming `Encoder`, `encode`/`decode`/`durationSec`, the single switch point of the platform recording format (M4A on macOS, WAV elsewhere) ([ADR 0012](adr/0012-recording-format-per-platform.md)) |
 | `src/m4a.zig` | M4A/AAC encode via AudioToolbox's system encoder (macOS only); container duration parse for `list`; `decode` back to canonical s16/48k/stereo PCM via `ExtAudioFileRead` ([ADR 0004](adr/0004-record-natively-in-m4a-aac.md)) |
 | `src/wav.zig` | PCM16 WAV streaming encoder (sizes patched on `finish`) and `parseWav` reader ([ADR 0012](adr/0012-recording-format-per-platform.md)) |
+| `src/devices.zig` | The `rec device` verb: lists the device integrations and dispatches `rec device <name> <action>` ([ADR 0022](adr/0022-device-integrations-and-bluetooth-sync.md)) |
+| `src/devices/ingest.zig` | What every integration shares: publish PCM into the library through `.part` + rename, skip stems already there, then transcribe and format in background mode |
+| `src/devices/airec/` | The AIREC recorder: `ops.zig` decodes its `.ops` files (80-byte CBR Opus packets) with libopus ([ADR 0021](adr/0021-import-airec-ops-recordings.md)); `protocol.zig` frames its BLE protocol; `session.zig` opens, lists, downloads, and follows events over any link; `fake.zig` simulates the recorder for tests and `-Dfake-airec` E2E builds; `airec.zig` runs `import`, `sync`, and `watch` |
+| `src/ble.zig` | Device-agnostic Bluetooth LE central: scan by advertised service, connect, subscribe, write, receive notifications. macOS drives CoreBluetooth on the main run loop; elsewhere it reports unsupported ([ADR 0022](adr/0022-device-integrations-and-bluetooth-sync.md)) |
+| `src/objc.zig` | Hand-declared Objective-C runtime calls (`objc_msgSend` cast per call, delegate class creation, autorelease pools) for CoreBluetooth; macOS only |
+| `src/localtime.zig` | Local wall clock as `YYYYMMDDHHMMSS`, shared by recording names and the clock rec sets on a device |
 | `src/player.zig` | In-process playback of decoded PCM on miniaudio's default output device: atomic playhead/paused/done, sample-accurate seek, silence-gated pause ([ADR 0010](adr/0010-play-audio-in-process.md)) |
 | `src/playback.zig` | Interactive transport: pause, seek, volume/mute, cut/reload, transcript/formatted note selection and generation; sample-position snapshots drive the listening room at a 33 ms frame budget. Paused or off-screen scenes skip recomposition; non-TTY playback remains blocking ([ADR 0020](adr/0020-audio-reactive-listening-room.md)) |
 | `src/deck.zig` | Responsive listening-room layout: title/format, visual mode, transport, full-color overview and cut markers, transcript, compact and focus modes, controls |
@@ -62,6 +69,7 @@ microphone ──miniaudio──▶ PCM frames in memory ──library.recording
 | `src/markdown.zig` | Renders rec's Markdown/frontmatter subset, wraps it to the terminal, and provides the non-flickering scrollable viewer |
 | `src/share.zig` / `src/sharecmd.zig` | Copy Markdown to the host clipboard and optionally open ChatGPT, Claude, or Gemini for pasting; expose `rec share` |
 | `src/miniaudio.c` + `vendor/miniaudio.h` | Vendored single-file audio I/O |
+| libopus (`build.zig.zon`, `allyourcodebase/opus`) | Opus decoding for the AIREC integration, compiled from source by zig and linked statically ([ADR 0021](adr/0021-import-airec-ops-recordings.md)) |
 
 ## Runtime & hosting
 

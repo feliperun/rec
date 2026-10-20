@@ -156,6 +156,38 @@ Prints the recordings in `~/recordings/` (newest first) with index,
 filename, duration parsed from the recording's container, and file size.
 Both `.m4a` and pre-existing `.wav` recordings are listed.
 
+### device
+
+```sh
+rec device                          # list the supported devices
+rec device airec sync               # fetch new recordings over Bluetooth
+rec device airec watch              # stay connected, bring each one in on save
+rec device airec import <file.ops>... # convert files copied off the recorder
+```
+
+Brings recordings in from other devices. They land in `~/recordings/` like
+any other recording, so `play`, cutting, `transcribe` and `format` work on
+them. The first device is the AIREC smart voice recorder.
+
+`sync` connects to the recorder over Bluetooth, downloads every recording
+the library does not have yet, disconnects, then transcribes and formats
+what arrived. `watch` stays connected: click A on the recorder to start,
+click A again to save, and a moment later the recording is in the library
+with its transcript and notes. It reconnects on its own when the recorder
+comes back in range; stop it with `Ctrl-C`. Both take `--no-notes` to stop
+after the import. Bluetooth sync works on macOS for now. Close the AIREC
+app on your phone first: the recorder accepts one connection at a time,
+and while rec holds it the app cannot connect.
+
+The recorder stores raw Opus (16 kHz mono, 32 kbps) without a container,
+in files named after the time the recording started. `rec` decodes them
+with libopus and saves them in the platform's recording format (M4A on
+macOS, WAV elsewhere) under the same name: `20241231221356.ops` becomes
+`20241231221356.m4a`. A recording already in the library is skipped, so
+syncing or importing again only adds what is new. Nothing on the recorder
+is changed or deleted, apart from its clock, which `rec` sets to your
+computer's time the way the AIREC app does.
+
 ### play
 
 ```sh
@@ -381,7 +413,9 @@ The binary lands at `zig-out/bin/rec`. Any host cross-compiles any target —
 Name the `gnu` ABI on Linux: a bare `x86_64-linux` resolves to musl and
 links statically, and the resulting binary captures only silence. Audio
 I/O (capture and playback) uses the vendored
-[miniaudio](https://miniaud.io) library; releases are built in `ReleaseFast`
+[miniaudio](https://miniaud.io) library, and the AIREC integration decodes
+Opus with [libopus](https://opus-codec.org), which zig fetches and compiles
+on the first build; releases are built in `ReleaseFast`
 mode (see `.github/workflows/release.yml`).
 
 ## How it works
@@ -391,6 +425,13 @@ mode (see `.github/workflows/release.yml`).
 - **M4A** — `src/m4a.zig` encodes captured PCM into an M4A/AAC container
   through AudioToolbox's system encoder and reads durations back out via the
   system MP4 parser.
+- **Devices**: `src/devices.zig` dispatches `rec device`; each device has
+  its folder under `src/devices/` (the AIREC one holds its `.ops` decoder and
+  its reverse-engineered Bluetooth protocol, documented in
+  [`docs/devices/airec-protocol.md`](docs/devices/airec-protocol.md)), and
+  `src/devices/ingest.zig` publishes what they bring in and runs the notes.
+  `src/ble.zig` is the Bluetooth LE central, driving CoreBluetooth through
+  the Objective-C runtime (`src/objc.zig`).
 - **Library** — `src/library.zig` scans `~/recordings/` (M4A + legacy WAV),
   sorts newest-first, and formats what `list` prints; numeric selections are
   always relative to this order across every command.

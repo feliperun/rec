@@ -1,4 +1,5 @@
 const std = @import("std");
+const devices = @import("devices.zig");
 const formatcmd = @import("formatcmd.zig");
 const library = @import("library.zig");
 const llm = @import("llm.zig");
@@ -25,6 +26,8 @@ const usage =
     \\  format [index|path] [--template name] [--out path] [--context text]
     \\                             Restructure a transcript with a prompt template
     \\                             (default: meeting, on the latest recording)
+    \\  device [name] [action]     Bring recordings in from a device (`rec device`
+    \\                             lists them, e.g. `rec device airec sync`)
     \\  share [index|path] [--to clipboard|chatgpt|claude|gemini]
     \\                             Copy or open a transcript in another app
     \\  view <path.md>             Read a Markdown document with scrolling
@@ -172,6 +175,16 @@ pub fn main(init: std.process.Init) u8 {
         return formatcmd.run(io, init.gpa, rest, home_dir, recordings_path, .terminal);
     }
 
+    if (std.mem.eql(u8, cmd, "device")) {
+        const api_key: ?[]u8 = init.minimal.environ.getAlloc(init.gpa, "DEEPGRAM_API_KEY") catch null;
+        defer if (api_key) |k| init.gpa.free(k);
+        return devices.run(io, init.gpa, rest, .{
+            .home_dir = home_dir,
+            .recordings_path = recordings_path,
+            .api_key = api_key,
+        });
+    }
+
     if (std.mem.eql(u8, cmd, "share")) {
         return share.run(io, init.gpa, rest, recordings_path);
     }
@@ -288,7 +301,14 @@ test "parseRecordArgs accepts a duration and rejects the rest" {
 }
 
 test {
-    if (@import("builtin").os.tag == .macos) _ = @import("m4a.zig");
+    if (@import("builtin").os.tag == .macos) {
+        _ = @import("m4a.zig");
+        _ = @import("objc.zig");
+    }
+    _ = @import("ble.zig");
+    _ = @import("devices.zig");
+    _ = @import("devices/airec/airec.zig");
+    _ = @import("localtime.zig");
     _ = @import("capture.zig");
     _ = @import("record.zig");
     _ = @import("formatcmd.zig");
@@ -307,6 +327,9 @@ test {
     _ = @import("transcribecmd.zig");
     _ = @import("update.zig");
     _ = @import("okf.zig");
+    _ = @import("devices/airec/ops.zig");
+    _ = @import("devices/airec/protocol.zig");
+    _ = @import("devices/airec/session.zig");
     _ = @import("waveform.zig");
     _ = @import("cut.zig");
     _ = @import("keys.zig");

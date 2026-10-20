@@ -163,6 +163,18 @@ file — keep appending.
   recording test can catch this. The −40 dBFS `LevelTracker` warning only
   fires after `audibility_min_sec`, so short clips look fine.
 
+- **The AIREC recorder stays mute until the session is opened the app's way.**
+  Every command before `01` is ignored without an error, and with only `01`
+  sent, a button press while connected records nothing and raises no event.
+  `session.zig` replays the vendor app's whole opening sequence (`opening`
+  and `after_clock`) before listening; do not trim it to the steps that look
+  necessary. See [ADR 0022](docs/adr/0022-device-integrations-and-bluetooth-sync.md)
+  and `docs/devices/airec-protocol.md`.
+- **With the macOS sysroot set, library paths are sysroot-relative.**
+  `libobjc.tbd` lives in the SDK's `usr/lib`; `build.zig` adds `/usr/lib`,
+  which zig prefixes with the SDK. An absolute SDK path gets prefixed twice
+  and the link fails with "unable to find dynamic system library 'objc'".
+
 - **A DC offset is not audible band energy.** The display's windowed band-pass
   bank must remove each channel's mean before restarting the filters, or every
   window invents a low-frequency transient. Keep the steady-offset regression in

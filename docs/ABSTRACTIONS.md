@@ -8,9 +8,10 @@
 
 | Layer | Modules | Single responsibility |
 |-------|---------|----------------------|
-| Transport / OS boundary | `capture.zig`, `player.zig`, `transcribe.zig` | Wrap one external producer/consumer (input device, output device, HTTP) |
-| Format | `wav.zig`, `okf.zig` | Encode/decode one on-disk format each; no policy |
+| Transport / OS boundary | `capture.zig`, `player.zig`, `transcribe.zig`, `ble.zig` | Wrap one external producer/consumer (input device, output device, HTTP) |
+| Format | `wav.zig`, `devices/airec/ops.zig`, `okf.zig` | Encode/decode one on-disk format each; no policy |
 | Domain | `library.zig` | The recordings collection: scan, sort, resolve `index|filename` selections |
+| Device integration | `devices.zig`, `devices/ingest.zig`, `devices/<name>/` | Bring recordings in from a device: its format and protocol live in its folder, publishing and notes in `ingest.zig` |
 | Presentation | `main.zig`, `record.zig`, `playback.zig`, `deck.zig`, `visualizer.zig` | CLI, interactive transport, responsive layout and pure visual rendering |
 
 The listening room analyzes immutable PCM through `spectrum.zig`; its fixed-size
@@ -25,6 +26,7 @@ analysis runs on miniaudio's callback thread. See [ADR 0020](adr/0020-audio-reac
 | Speaker (CoreAudio via miniaudio) | `player.zig` |
 | Deepgram pre-recorded API (`/usr/bin/curl`) | `transcribe.zig` |
 | Filesystem (`~/recordings/`) | `library.zig` |
+| Bluetooth LE (CoreBluetooth via the Objective-C runtime) | `ble.zig`, `objc.zig` |
 
 ## Contracts & invariants
 

@@ -1,6 +1,12 @@
 .{
     .name = .rec,
     .version = "3.1.2", // x-release-please-version
+    .dependencies = .{
+        .opus = .{
+            .url = "git+https://github.com/allyourcodebase/opus#bf3035fccc0864b70b6692a7e04555766dda3d60",
+            .hash = "opus-0.0.2-vuF-cFOQAABTWWMmx9jCwILGibts9ZOg_bCGGIHSXKKL",
+        },
+    },
     .minimum_zig_version = "0.16.0",
     .fingerprint = 0x6405ca2cd4ff648d,
     .paths = .{

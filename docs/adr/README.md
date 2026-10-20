@@ -66,3 +66,5 @@ proposed → active → superseded
 | [0018](0018-scrollable-terminal-documents.md) | Indexed scrollable terminal documents | active |
 | [0019](0019-audio-note-sessions.md) | Generate and read audio notes inside playback | active |
 | [0020](0020-audio-reactive-listening-room.md) | An audio-reactive listening room over decoded PCM | active |
+| [0021](0021-import-airec-ops-recordings.md) | Import AIREC .ops recordings through libopus | active |
+| [0022](0022-device-integrations-and-bluetooth-sync.md) | Device integrations, with Bluetooth sync for the AIREC recorder | active |
