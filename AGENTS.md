@@ -175,6 +175,13 @@ file — keep appending.
   which zig prefixes with the SDK. An absolute SDK path gets prefixed twice
   and the link fails with "unable to find dynamic system library 'objc'".
 
+- **Windows CRT `_open` defaults to text mode.** `_open(path, 0)` ends a
+  read at the first 0x1a byte, so `wav.readWholeFile` returned 572 of 12,080
+  bytes of an `.ops` file and the import reported 00:00; macOS and Linux
+  never show it. Every CRT open of audio passes `_O_BINARY` (0x8000); the
+  "readWholeFile reads binary bytes past a Ctrl-Z" test in `src/wav.zig`
+  and `scripts/e2e_airec.py` on the Windows runner guard it.
+
 - **A DC offset is not audible band energy.** The display's windowed band-pass
   bank must remove each channel's mean before restarting the filters, or every
   window invents a low-frequency transient. Keep the steady-offset regression in
